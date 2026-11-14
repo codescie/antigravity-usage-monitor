@@ -29,10 +29,21 @@ import {
   saveJson,
 } from './backend/config.mjs';
 import {
+  ensureContextWindowAlignedOnBoot,
+  getContextWindowControlSnapshot,
+  switchContextWindowMode,
+} from './backend/context-window-manager.mjs';
+import {
   performPluginUpdate,
   scheduleSidecarRestart,
   syncCloudCatalog,
 } from './backend/plugin-updater.mjs';
+import {
+  cancelAntigravityModelDetection,
+  getModelDetectorStatus,
+  startAntigravityModelDetection,
+  syncDetectorBank,
+} from './backend/model-detector.mjs';
 import { getCloudStatus } from './backend/pricing-catalog.mjs';
 import { buildTelemetryPayload } from './backend/telemetry-builder.mjs';
 import {
@@ -274,6 +285,81 @@ async function executePluginUpdateAction() {
   };
 }
 
+async function executeModelDetectorStatusAction(data) {
+  const statusPayload = await getModelDetectorStatus(data);
+  return {
+    status: 200,
+    contentType: 'application/json',
+    headers: { 'Cache-Control': 'no-store' },
+    body: JSON.stringify(statusPayload),
+  };
+}
+
+async function executeModelDetectorStartAction(data) {
+  const result = await startAntigravityModelDetection(data);
+  return {
+    status: result.ok ? 200 : Number(result.statusHttp || 400),
+    contentType: 'application/json',
+    headers: { 'Cache-Control': 'no-store' },
+    body: JSON.stringify(result),
+  };
+}
+
+async function executeModelDetectorCancelAction(data) {
+  const result = await cancelAntigravityModelDetection(data);
+  return {
+    status: 200,
+    contentType: 'application/json',
+    headers: { 'Cache-Control': 'no-store' },
+    body: JSON.stringify(result),
+  };
+}
+
+async function executeModelDetectorSyncAction(data) {
+  const [bankSync] = await Promise.all([
+    syncDetectorBank({ force: true }),
+    syncCloudCatalog({ force: true }).catch(() => null),
+  ]);
+  const statusPayload = await getModelDetectorStatus({
+    ...data,
+    force: true,
+  });
+  return {
+    status: 200,
+    contentType: 'application/json',
+    headers: { 'Cache-Control': 'no-store' },
+    body: JSON.stringify({
+      ...statusPayload,
+      syncResult: {
+        updated: Boolean(bankSync?.updated),
+        upToDate: Boolean(bankSync?.upToDate),
+        error: bankSync?.error || '',
+      },
+    }),
+  };
+}
+
+async function executeContextWindowStatusAction() {
+  const contextWindowControl = await getContextWindowControlSnapshot({ forceRefresh: true });
+  return {
+    status: 200,
+    contentType: 'application/json',
+    headers: { 'Cache-Control': 'no-store' },
+    body: JSON.stringify({ ok: true, contextWindowControl }),
+  };
+}
+
+async function executeContextWindowSwitchAction(data) {
+  const rawMode = isPlainObject(data) ? data.mode : undefined;
+  const result = await switchContextWindowMode(rawMode);
+  return {
+    status: result.ok ? 200 : 400,
+    contentType: 'application/json',
+    headers: { 'Cache-Control': 'no-store' },
+    body: JSON.stringify(result),
+  };
+}
+
 async function dispatchBridgeApiRequest(pathname, method, data) {
   if (pathname === '/api/telemetry' && method === 'GET') {
     return executeTelemetryAction(data);
@@ -286,6 +372,24 @@ async function dispatchBridgeApiRequest(pathname, method, data) {
   }
   if (pathname === '/api/plugin-update' && method === 'POST') {
     return executePluginUpdateAction();
+  }
+  if (pathname === '/api/context-window/status' && method === 'GET') {
+    return executeContextWindowStatusAction();
+  }
+  if (pathname === '/api/context-window/switch' && method === 'POST') {
+    return executeContextWindowSwitchAction(data);
+  }
+  if (pathname === '/api/model-detector/status' && method === 'GET') {
+    return executeModelDetectorStatusAction(data);
+  }
+  if (pathname === '/api/model-detector/detect' && method === 'POST') {
+    return executeModelDetectorStartAction(data);
+  }
+  if (pathname === '/api/model-detector/cancel' && method === 'POST') {
+    return executeModelDetectorCancelAction(data);
+  }
+  if (pathname === '/api/model-detector/sync' && method === 'POST') {
+    return executeModelDetectorSyncAction(data);
   }
   return {
     status: 404,
@@ -361,13 +465,115 @@ app.api('/api/plugin-update', async (_data, req) => {
   });
 });
 
+app.api(
+  '/api/model-detector/status',
+  async (data, req) => {
+    if (!isLocalHostRequest(req)) {
+      return new Response(JSON.stringify({ error: 'Forbidden host or origin' }), {
+        status: 403,
+        contentType: 'application/json',
+      });
+    }
+    const out = await executeModelDetectorStatusAction(data);
+    return new Response(out.body, {
+      status: out.status,
+      contentType: out.contentType,
+      headers: out.headers,
+    });
+  },
+  'GET'
+);
+
+app.api('/api/model-detector/detect', async (data, req) => {
+  if (!isLocalHostRequest(req)) {
+    return new Response(JSON.stringify({ error: 'Forbidden host or origin' }), {
+      status: 403,
+      contentType: 'application/json',
+    });
+  }
+  const out = await executeModelDetectorStartAction(data);
+  return new Response(out.body, {
+    status: out.status,
+    contentType: out.contentType,
+    headers: out.headers,
+  });
+});
+
+app.api('/api/model-detector/cancel', async (data, req) => {
+  if (!isLocalHostRequest(req)) {
+    return new Response(JSON.stringify({ error: 'Forbidden host or origin' }), {
+      status: 403,
+      contentType: 'application/json',
+    });
+  }
+  const out = await executeModelDetectorCancelAction(data);
+  return new Response(out.body, {
+    status: out.status,
+    contentType: out.contentType,
+    headers: out.headers,
+  });
+});
+
+app.api('/api/model-detector/sync', async (data, req) => {
+  if (!isLocalHostRequest(req)) {
+    return new Response(JSON.stringify({ error: 'Forbidden host or origin' }), {
+      status: 403,
+      contentType: 'application/json',
+    });
+  }
+  const out = await executeModelDetectorSyncAction(data);
+  return new Response(out.body, {
+    status: out.status,
+    contentType: out.contentType,
+    headers: out.headers,
+  });
+});
+
+app.api(
+  '/api/context-window/status',
+  async (_data, req) => {
+    if (!isLocalHostRequest(req)) {
+      return new Response(JSON.stringify({ error: 'Forbidden host or origin' }), {
+        status: 403,
+        contentType: 'application/json',
+      });
+    }
+    const out = await executeContextWindowStatusAction();
+    return new Response(out.body, {
+      status: out.status,
+      contentType: out.contentType,
+      headers: out.headers,
+    });
+  },
+  'GET'
+);
+
+app.api('/api/context-window/switch', async (data, req) => {
+  if (!isLocalHostRequest(req)) {
+    return new Response(JSON.stringify({ error: 'Forbidden host or origin' }), {
+      status: 403,
+      contentType: 'application/json',
+    });
+  }
+  const out = await executeContextWindowSwitchAction(data);
+  return new Response(out.body, {
+    status: out.status,
+    contentType: out.contentType,
+    headers: out.headers,
+  });
+});
+
 app.run();
 if (LS_ADDR && LS_ADDR !== 'test.invalid') {
+  ensureContextWindowAlignedOnBoot().catch(() => {});
   syncCloudCatalog({ force: false }).catch(() => {});
+  syncDetectorBank({ force: false }).catch(() => {});
   startDefaultWindowBridge({
     handleApiRequest: dispatchBridgeApiRequest,
     readAssetFn: readLocalAsync,
     bootBundleVersion,
+    lsAddr: LS_ADDR,
     onVersionDrift: () => scheduleSidecarRestart(150),
+    onParentLsDead: () => scheduleSidecarRestart(50),
   });
 }

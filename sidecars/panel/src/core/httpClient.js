@@ -75,11 +75,12 @@ function callViaCdpBridge(bridge, path, { method, body, signal }) {
       if (idx >= 0) bridge.rpcQueue.splice(idx, 1);
     };
 
+    const rpcTimeoutMs = method && String(method).toUpperCase() !== 'GET' ? 30000 : 8000;
     const timeoutId = setTimeout(() => {
       bridge.rpcPending.delete(reqId);
       cleanupQueueItem();
       reject(new Error('CDP bridge timeout'));
-    }, 8000);
+    }, rpcTimeoutMs);
 
     const onAbort = () => {
       clearTimeout(timeoutId);

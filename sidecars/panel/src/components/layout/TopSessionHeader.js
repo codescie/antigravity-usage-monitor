@@ -116,26 +116,33 @@ export const TopSessionHeader = defineComponent({
 
       const actConv = telemetry?.activeConversation;
       const convs = telemetry?.conversations || [];
-      const hostRouteId = telSt.hostRouteConversationId || '';
-      const hostMatchedConv = hostRouteId
-        ? convs.find((c) => c.cascadeId === hostRouteId) ||
-          (actConv?.cascadeId === hostRouteId ? actConv : null)
+      const rawHostRouteId = telSt.hostRouteConversationId || '';
+      const rawHostMatched = rawHostRouteId
+        ? convs.find((c) => c.cascadeId === rawHostRouteId) ||
+          (actConv?.cascadeId === rawHostRouteId ? actConv : null)
         : null;
-      const defaultOptLabel = hostRouteId
-        ? hostMatchedConv?.title
+      const isHostProbe =
+        Boolean(rawHostMatched?.title) &&
+        String(rawHostMatched.title).trim().startsWith('[模型检测探针]');
+      const hostRouteId = rawHostRouteId && !isHostProbe ? rawHostRouteId : '';
+      const hostMatchedConv = hostRouteId ? rawHostMatched : null;
+      const defaultOptLabel = hostMatchedConv
+        ? hostMatchedConv.title
           ? `当前窗口 (${hostMatchedConv.title})`
           : `当前窗口 (${hostRouteId.slice(0, 8)})`
-        : convs[0]?.title
-          ? `最新 (${convs[0].title})`
-          : '跟随最新会话';
-      const defaultOptMeta = hostRouteId
-        ? hostMatchedConv
-          ? formatConvOptionMeta({
-              stepCount: hostMatchedConv.stepCount,
-              subagentCount: hostMatchedConv.subagentCount,
-              totalStepCount: hostMatchedConv.totalStepCount ?? hostMatchedConv.totalStepsAllAgents,
-            })
-          : ''
+        : actConv?.title && actConv.title !== '当前会话'
+          ? `当前会话 (${actConv.title})`
+          : convs[0]?.title
+            ? `最新 (${convs[0].title})`
+            : hostRouteId
+              ? `当前窗口 (${hostRouteId.slice(0, 8)})`
+              : '跟随最新会话';
+      const defaultOptMeta = hostMatchedConv
+        ? formatConvOptionMeta({
+            stepCount: hostMatchedConv.stepCount,
+            subagentCount: hostMatchedConv.subagentCount,
+            totalStepCount: hostMatchedConv.totalStepCount ?? hostMatchedConv.totalStepsAllAgents,
+          })
         : convs[0]
           ? formatConvOptionMeta(convs[0])
           : '';

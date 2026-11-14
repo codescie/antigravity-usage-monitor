@@ -33,6 +33,7 @@ import {
   extractHostRouteCascadeId,
   fetchTelemetry,
   formatAgentLabel,
+  formatContextTierLabel,
   getAgentBadgeClass,
   normalizeClientTopbarSlots,
   normalizeClientUpdateMode,
@@ -819,6 +820,11 @@ export function mountWindowOverlay() {
     hidden: true,
     text: '主代理',
   });
+  const hoverCtxTierBadge = h('span', {
+    className: 'agent-badge',
+    hidden: true,
+    text: '256K',
+  });
   const hoverCtxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
   const hoverCtxSegmentBar = ContextSegmentMeter({ context: {} });
 
@@ -845,6 +851,7 @@ export function mountWindowOverlay() {
       h('span', { className: 'panel-title' }, [
         createSvgIcon('layers', { size: 13 }),
         h('span', { text: '上下文窗口' }),
+        hoverCtxTierBadge,
         hoverCtxAgentBadge,
       ]),
       h('span', { className: 'panel-meta' }, [hoverCtxSummaryText]),
@@ -1646,7 +1653,12 @@ export function mountWindowOverlay() {
     const activeConv = telemetry.activeConversation || {};
     const overviewActive = overviewScopedConv || activeConv;
     const ctx = ctxAgent?.context || overviewActive.context || activeConv.context || {};
-    const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000);
+    const ctxCtrl = telemetry.contextWindowControl || null;
+    const fallbackLimit =
+      ctxCtrl?.installed && ctxCtrl?.runningMatchesDisk && ctxCtrl?.targetTokens
+        ? ctxCtrl.targetTokens
+        : 256000;
+    const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || fallbackLimit);
     const totalTokens = Number(ctx.totalTokens || 0);
     const usedPct =
       limitTokens > 0 ? Math.min(100, +((totalTokens / limitTokens) * 100).toFixed(1)) : 0;
@@ -2020,6 +2032,23 @@ export function mountWindowOverlay() {
       hoverCacheSub,
       `缓存 ${overviewActive.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(overviewActive.sessionCostUsd || 0)}`
     );
+
+    const showHoverTier = Boolean(ctxCtrl?.installed);
+    patchAttr(hoverCtxTierBadge, 'hidden', !showHoverTier);
+    if (showHoverTier) {
+      const tierLabel = formatContextTierLabel(ctxCtrl.mode);
+      const pendingRestart = Boolean(ctxCtrl.needsRestart);
+      patchText(hoverCtxTierBadge, pendingRestart ? `${tierLabel} · 待重启` : tierLabel);
+      patchAttr(
+        hoverCtxTierBadge,
+        'class',
+        pendingRestart
+          ? 'agent-badge badge-tier-warn'
+          : ctxCtrl.mode && ctxCtrl.mode !== '256k'
+            ? 'agent-badge badge-main'
+            : 'agent-badge'
+      );
+    }
 
     patchAttr(hoverCtxAgentBadge, 'hidden', !(hasSubagents && ctxAgent));
     if (hasSubagents && ctxAgent) {

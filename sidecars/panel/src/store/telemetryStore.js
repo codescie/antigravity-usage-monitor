@@ -151,6 +151,23 @@ function isEquivalentTelemetry(prev, next) {
     return false;
   }
 
+  // 2b. 比对 Antigravity 上下文压缩水位控制状态（与 MetaBot 双向共享策略）
+  const pCtxCtrl = prev.contextWindowControl;
+  const nCtxCtrl = next.contextWindowControl;
+  if (
+    pCtxCtrl?.supported !== nCtxCtrl?.supported ||
+    pCtxCtrl?.installed !== nCtxCtrl?.installed ||
+    pCtxCtrl?.mode !== nCtxCtrl?.mode ||
+    pCtxCtrl?.diskMode !== nCtxCtrl?.diskMode ||
+    pCtxCtrl?.targetTokens !== nCtxCtrl?.targetTokens ||
+    pCtxCtrl?.binaryState !== nCtxCtrl?.binaryState ||
+    pCtxCtrl?.needsRestart !== nCtxCtrl?.needsRestart ||
+    pCtxCtrl?.runningMatchesDisk !== nCtxCtrl?.runningMatchesDisk ||
+    pCtxCtrl?.lastError !== nCtxCtrl?.lastError
+  ) {
+    return false;
+  }
+
   // 3. 比对活跃会话的实时测速指标（会话 ID、步数、子代理拓扑、运行状态、TPS、TTFT、当前模型标识与费用）
   if (pAct?.cascadeId !== nAct?.cascadeId) return false;
   if (pAct?.stepCount !== nAct?.stepCount) return false;
@@ -264,6 +281,9 @@ function isEquivalentTelemetry(prev, next) {
         bs?.costUsd !== as?.costUsd ||
         bs?.tokPerSec !== as?.tokPerSec ||
         bs?.ttftSec !== as?.ttftSec ||
+        bs?.totalDurationSec !== as?.totalDurationSec ||
+        bs?.turnIndex !== as?.turnIndex ||
+        bs?.rootTurnIndex !== as?.rootTurnIndex ||
         bs?.outputTokens !== as?.outputTokens ||
         bs?.inputTokens !== as?.inputTokens ||
         bs?.cacheReadTokens !== as?.cacheReadTokens ||
@@ -304,6 +324,9 @@ function isEquivalentTelemetry(prev, next) {
       before.costUsd !== after.costUsd ||
       before.tokPerSec !== after.tokPerSec ||
       before.ttftSec !== after.ttftSec ||
+      before.totalDurationSec !== after.totalDurationSec ||
+      before.turnIndex !== after.turnIndex ||
+      before.rootTurnIndex !== after.rootTurnIndex ||
       before.outputTokens !== after.outputTokens ||
       before.inputTokens !== after.inputTokens ||
       before.cacheReadTokens !== after.cacheReadTokens ||
@@ -671,6 +694,186 @@ export async function triggerPluginUpdate() {
     }
   }
   await fetchTelemetry({ force: true });
+  return res;
+}
+
+export const CURRENT_WINDOW_MODEL_VALUE = '__current__';
+
+function normalizeHostButtonModelText(raw) {
+  return String(raw || '')
+    .replace(/[()[\]]/g, ' ')
+    .replace(/\b(?:new|fast|notice|beta|preview)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * 解析当前窗口关联的活跃会话 ID（优先用户选中会话，其次宿主 `/c/<uuid>` 路由，最后回退遥测活跃会话）。
+ *
+ * @returns {string}
+ */
+export function resolveActiveWindowConversationId() {
+  const st = telemetryStore.getState();
+  const routeId = isWindowOverlayMode() ? extractHostRouteCascadeId() : '';
+  return (
+    st.selectedConversationId ||
+    routeId ||
+    st.hostRouteConversationId ||
+    st.telemetry?.activeConversation?.cascadeId ||
+    ''
+  );
+}
+
+/**
+ * 在主窗口双栖模式下提取输入框底部模型选择按钮的当前文本，以便在用户刚切换模型尚未发送消息时立即跟随。
+ *
+ * @param {Array<{ label?: string, modelId?: string }>} [knownModels=[]]
+ * @returns {string}
+ */
+export function extractHostComposerModelHint(knownModels = []) {
+  if (typeof document === 'undefined' || !isWindowOverlayMode()) return '';
+  if (typeof document.querySelectorAll !== 'function') return '';
+  const knownNormSet = new Set(
+    (Array.isArray(knownModels) ? knownModels : [])
+      .map((m) => normalizeHostButtonModelText(m?.label || m?.modelId || ''))
+      .filter(Boolean)
+  );
+
+  let buttons;
+  try {
+    buttons = document.querySelectorAll('button, [role="button"]');
+  } catch {
+    return '';
+  }
+
+  const candidates = [];
+  for (const btn of buttons) {
+    if (!btn || typeof btn.closest !== 'function') continue;
+    if (
+      btn.closest('#ag-usage-monitor-capsule') ||
+      btn.closest('#ag-usage-monitor-portal') ||
+      btn.closest('[role="menu"]') ||
+      btn.closest('[role="listbox"]')
+    ) {
+      continue;
+    }
+    const role = String(btn.getAttribute?.('role') || '');
+    if (role === 'menuitem' || role === 'menuitemradio' || role === 'option') continue;
+
+    const rawText = String(btn.textContent || '').replace(/\s+/g, ' ').trim();
+    if (rawText.length < 4 || rawText.length > 60) continue;
+
+    const norm = normalizeHostButtonModelText(rawText);
+    if (!norm) continue;
+    const isKnown = knownNormSet.size > 0 && knownNormSet.has(norm);
+    const looksLikeAgModel = /^(?:gemini\s+\d|claude\s+(?:opus|sonnet|haiku)|orchestrator\b|gpt[- ]oss\b)/i.test(
+      norm
+    );
+    if (!isKnown && !looksLikeAgModel) continue;
+
+    let topY = 0;
+    if (typeof btn.getBoundingClientRect === 'function') {
+      const rect = btn.getBoundingClientRect();
+      if (rect.width <= 0 && rect.height <= 0) continue;
+      topY = rect.top;
+    }
+    const hasPopup = Boolean(btn.getAttribute?.('aria-haspopup'));
+    candidates.push({ rawText, isKnown, hasPopup, topY });
+  }
+
+  if (!candidates.length) return '';
+  candidates.sort((a, b) => {
+    if (a.isKnown !== b.isKnown) return a.isKnown ? -1 : 1;
+    if (a.hasPopup !== b.hasPopup) return a.hasPopup ? -1 : 1;
+    return b.topY - a.topY;
+  });
+  return candidates[0].rawText;
+}
+
+export async function fetchModelDetectorStatus({ force = false, knownModels = [] } = {}) {
+  const params = new URLSearchParams();
+  const convId = resolveActiveWindowConversationId();
+  const hint = extractHostComposerModelHint(knownModels);
+  if (convId) params.set('conversationId', convId);
+  if (hint) params.set('composerModelHint', hint);
+  if (force) params.set('force', '1');
+  const qs = params.toString();
+  return callSidecarApi(`/api/model-detector/status${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    abortKey: force ? 'model-detector-force' : 'model-detector-poll',
+  });
+}
+
+export async function triggerModelDetection({
+  modelId = CURRENT_WINDOW_MODEL_VALUE,
+  probeMode = 'fast',
+  knownModels = [],
+} = {}) {
+  const convId = resolveActiveWindowConversationId();
+  const hint = extractHostComposerModelHint(knownModels);
+  return callSidecarApi('/api/model-detector/detect', {
+    method: 'POST',
+    body: {
+      modelId: modelId || CURRENT_WINDOW_MODEL_VALUE,
+      probeMode: probeMode === 'exact' ? 'exact' : 'fast',
+      conversationId: convId,
+      composerModelHint: hint,
+    },
+  });
+}
+
+export async function cancelModelDetection({ knownModels = [] } = {}) {
+  const convId = resolveActiveWindowConversationId();
+  const hint = extractHostComposerModelHint(knownModels);
+  return callSidecarApi('/api/model-detector/cancel', {
+    method: 'POST',
+    body: {
+      conversationId: convId,
+      composerModelHint: hint,
+    },
+  });
+}
+
+export async function syncModelDetector({ knownModels = [] } = {}) {
+  const convId = resolveActiveWindowConversationId();
+  const hint = extractHostComposerModelHint(knownModels);
+  const res = await callSidecarApi('/api/model-detector/sync', {
+    method: 'POST',
+    body: {
+      conversationId: convId,
+      composerModelHint: hint,
+    },
+  });
+  void fetchTelemetry({ force: true });
+  return res;
+}
+
+export function formatContextTierLabel(mode) {
+  const norm = String(mode || '').trim().toLowerCase();
+  if (norm === '512k') return '512K';
+  if (norm === '768k') return '768K';
+  if (norm === '1m') return '1M';
+  return '256K';
+}
+
+export async function switchContextWindow(mode) {
+  const res = await callSidecarApi('/api/context-window/switch', {
+    method: 'POST',
+    body: { mode },
+  });
+  if (res?.contextWindowControl) {
+    const st = telemetryStore.getState();
+    if (st.telemetry) {
+      telemetryStore.setState({
+        telemetry: {
+          ...st.telemetry,
+          contextWindowControl: res.contextWindowControl,
+        },
+      });
+    }
+  }
+  void fetchTelemetry({ force: false });
   return res;
 }
 

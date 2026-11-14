@@ -22,11 +22,17 @@ import {
 } from './config.mjs';
 
 const BRIDGE_MAX_BODY_BYTES = 64 * 1024;
-const ALLOWED_BRIDGE_PATHS = new Set([
+export const ALLOWED_BRIDGE_PATHS = new Set([
   '/api/telemetry',
   '/api/settings',
   '/api/cloud-sync',
   '/api/plugin-update',
+  '/api/context-window/status',
+  '/api/context-window/switch',
+  '/api/model-detector/status',
+  '/api/model-detector/detect',
+  '/api/model-detector/cancel',
+  '/api/model-detector/sync',
 ]);
 
 /**
@@ -157,8 +163,11 @@ export function createWindowBridgeController(options) {
     fastPollIntervalMs = 1500,
     cdpTimeoutMs = 3500,
     bootBundleVersion = '',
+    lsAddr = env.ANTIGRAVITY_LS_ADDRESS || '',
     onVersionDrift = null,
+    onParentLsDead = null,
     leaseFilePath = '',
+    probeLoopbackAliveFn = null,
     WebSocketImpl = globalThis.WebSocket,
   } = options || {};
 
@@ -183,18 +192,55 @@ export function createWindowBridgeController(options) {
   let syncInFlight = null;
   let hadInjectedTargets = false;
   let cdpFallbackActive = false;
+  let deadLsStrikes = 0;
   let nodeDepsPromise = null;
 
   async function loadNodeDeps() {
     if (!nodeDepsPromise) {
-      nodeDepsPromise = Promise.all([import('node:http'), import('node:crypto')]).then(
-        ([httpMod, cryptoMod]) => ({
-          http: httpMod.default || httpMod,
-          crypto: cryptoMod.default || cryptoMod,
-        })
-      );
+      nodeDepsPromise = Promise.all([
+        import('node:http'),
+        import('node:crypto'),
+        import('node:net'),
+      ]).then(([httpMod, cryptoMod, netMod]) => ({
+        http: httpMod.default || httpMod,
+        crypto: cryptoMod.default || cryptoMod,
+        net: netMod.default || netMod,
+      }));
     }
     return nodeDepsPromise;
+  }
+
+  async function isLsAddressReachable(rawAddr) {
+    if (typeof probeLoopbackAliveFn === 'function') {
+      return probeLoopbackAliveFn(rawAddr);
+    }
+    const clean = String(rawAddr || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+    if (!clean || clean === 'test.invalid') return true;
+    const colonIdx = clean.lastIndexOf(':');
+    const port = colonIdx >= 0 ? Number(clean.slice(colonIdx + 1)) : 0;
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) return true;
+    const rawHost = colonIdx > 0 ? clean.slice(0, colonIdx).replace(/^\[|\]$/g, '') : '127.0.0.1';
+    const host = !rawHost || rawHost === 'localhost' ? '127.0.0.1' : rawHost;
+    const { net } = await loadNodeDeps();
+    if (!net?.createConnection) return true;
+    return new Promise((resolve) => {
+      let settled = false;
+      const sock = net.createConnection({ host, port });
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        try {
+          sock.destroy();
+        } catch {
+          // 忽略销毁异常
+        }
+        resolve(ok);
+      };
+      sock.setTimeout(250);
+      sock.once('connect', () => done(true));
+      sock.once('timeout', () => done(false));
+      sock.once('error', () => done(false));
+    });
   }
 
   function applyCorsHeaders(res, origin) {
@@ -515,24 +561,51 @@ export function createWindowBridgeController(options) {
       return { ok: false, reason: 'version_drift_restarting', injected: 0 };
     }
 
+    // 自检当前 Sidecar 绑定的宿主 language_server 是否仍在监听，防止 Windows 关闭/重启窗口后残留孤儿进程继续持有桥接租约
+    if (lsAddr && lsAddr !== 'test.invalid') {
+      const selfLsAlive = await isLsAddressReachable(lsAddr);
+      if (!selfLsAlive) {
+        deadLsStrikes += 1;
+        if (deadLsStrikes >= 2) {
+          if (leaseFilePath) {
+            const curLease = loadJson(leaseFilePath, null);
+            if (Number(curLease?.pid || 0) === process.pid) {
+              saveJson(leaseFilePath, { ...curLease, updatedAtMs: 0 });
+            }
+          }
+          onParentLsDead?.();
+        }
+        return { ok: false, reason: 'parent_ls_unreachable', injected: 0 };
+      }
+      deadLsStrikes = 0;
+    }
+
     const enabled = Boolean(getSettingsFn()?.enableWindowOverlay !== false);
     if (enabled && leaseFilePath && !forceReinject) {
       const lease = loadJson(leaseFilePath, null);
       const leasePid = Number(lease?.pid || 0);
       const leaseAgeMs = Date.now() - Number(lease?.updatedAtMs || 0);
       if (leasePid > 0 && leasePid !== process.pid && leaseAgeMs >= 0 && leaseAgeMs < 9000 && isPidAlive(leasePid)) {
-        const leaseVerNum = Number(lease?.bundleVersion) || 0;
-        const myVerNum = Number(bundleVersion) || 0;
-        if (leaseVerNum > myVerNum) {
-          onVersionDrift?.();
-          return { ok: false, enabled: true, reason: 'older_than_leader', injected: 0 };
-        }
-        if (leaseVerNum === myVerNum || String(lease?.bundleVersion || '') === bundleVersion) {
-          return { ok: true, enabled: true, reason: 'follower_yield', leaderPid: leasePid, injected: 0 };
+        const leaseLsAddr = String(lease?.lsAddr || '').trim();
+        const leaderLsAlive =
+          !leaseLsAddr || leaseLsAddr === 'test.invalid' || leaseLsAddr === String(lsAddr || '').trim()
+            ? true
+            : await isLsAddressReachable(leaseLsAddr);
+        if (leaderLsAlive) {
+          const leaseVerNum = Number(lease?.bundleVersion) || 0;
+          const myVerNum = Number(bundleVersion) || 0;
+          if (leaseVerNum > myVerNum) {
+            onVersionDrift?.();
+            return { ok: false, enabled: true, reason: 'older_than_leader', injected: 0 };
+          }
+          if (leaseVerNum === myVerNum || String(lease?.bundleVersion || '') === bundleVersion) {
+            return { ok: true, enabled: true, reason: 'follower_yield', leaderPid: leasePid, injected: 0 };
+          }
         }
       }
       saveJson(leaseFilePath, {
         pid: process.pid,
+        lsAddr: String(lsAddr || '').trim(),
         bundleVersion,
         updatedAtMs: Date.now(),
       });

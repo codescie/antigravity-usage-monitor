@@ -194,7 +194,7 @@ export function loadJson(filePath, fallback) {
  */
 export function saveJson(filePath, data) {
   try {
-    mkdirSync(DATA_DIR, { recursive: true });
+    mkdirSync(dirname(filePath) || DATA_DIR, { recursive: true });
     const serialized =
       filePath === CACHE_FILE ? JSON.stringify(data) : JSON.stringify(data, null, 2);
     writeFileSync(filePath, serialized, 'utf8');

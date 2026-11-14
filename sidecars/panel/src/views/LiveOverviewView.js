@@ -31,8 +31,10 @@ import { createSvgIcon } from '../icons/SvgIcon.js';
 import {
   fetchTelemetry,
   formatAgentLabel,
+  formatContextTierLabel,
   getAgentBadgeClass,
   resolveScopedConversation,
+  switchContextWindow,
   telemetryStore,
 } from '../store/telemetryStore.js';
 import { uiStore } from '../store/uiStore.js';
@@ -518,6 +520,92 @@ export const LiveOverviewView = defineComponent({
     const ctxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
     const ctxSegmentBar = ContextSegmentMeter({ context: {} });
 
+    const ctxTierStatusEl = h('span', {
+      className: 'ctx-tier-status',
+      text: '压缩水位 · 原版',
+    });
+    const ctxTierDefs = [
+      {
+        key: '256k',
+        label: '256K',
+        hint: '压缩水位 · 原版',
+        title: '切回 256K 官方原版水位 (256,000 tokens · 从原版备份字节级还原)',
+      },
+      {
+        key: '512k',
+        label: '512K',
+        hint: '压缩水位 · 均衡',
+        title: '切换至 512K 日常均衡水位 (524,288 tokens · 兼顾缓存命中与跨模块记忆)',
+      },
+      {
+        key: '768k',
+        label: '768K',
+        hint: '压缩水位 · 深度',
+        title: '切换至 768K 深度攻坚水位 (786,432 tokens · 预留 256Ki 思考与输出安全区)',
+      },
+      {
+        key: '1m',
+        label: '1M',
+        hint: '压缩水位 · 极限',
+        title: '1M 兼容极限水位 (983,040 tokens)',
+        legacyOnly: true,
+      },
+    ];
+    let isSwitchingContext = false;
+    let switchingTargetLabel = '';
+    let ctxSwitchErrorMsg = '';
+
+    const ctxTierButtons = ctxTierDefs.map((tier) => {
+      const btn = h('button', {
+        type: 'button',
+        className: 'ctx-tier-btn',
+        title: tier.title,
+        text: tier.label,
+        hidden: Boolean(tier.legacyOnly),
+      });
+      btn.onclick = async () => {
+        if (isSwitchingContext) return;
+        const curCtrl = latestData?.contextWindowControl;
+        if (
+          curCtrl &&
+          curCtrl.mode === tier.key &&
+          curCtrl.diskMode === tier.key &&
+          !ctxSwitchErrorMsg
+        ) {
+          return;
+        }
+        isSwitchingContext = true;
+        switchingTargetLabel = tier.label;
+        ctxSwitchErrorMsg = '';
+        if (latestData) renderData(latestData);
+        try {
+          const res = await switchContextWindow(tier.key);
+          if (!res?.ok) {
+            ctxSwitchErrorMsg = res?.error || '切换失败';
+          }
+        } catch (err) {
+          ctxSwitchErrorMsg = err?.message || '切换请求失败';
+        } finally {
+          isSwitchingContext = false;
+          switchingTargetLabel = '';
+          const nextTel = telemetryStore.getState().telemetry || latestData;
+          if (nextTel) renderData(nextTel);
+        }
+      };
+      return { ...tier, btn };
+    });
+
+    const ctxTierPillsEl = h(
+      'div',
+      { className: 'ctx-tier-pills', role: 'group', 'aria-label': '上下文压缩水位档位' },
+      ctxTierButtons.map((t) => t.btn)
+    );
+    const ctxTierBar = h(
+      'div',
+      { className: 'ctx-tier-bar', hidden: true },
+      [ctxTierStatusEl, ctxTierPillsEl]
+    );
+
     const ctxPillGroup = h('div', { className: 'ctx-pill-group' });
     const ctxInspectorBar = h(
       'div',
@@ -553,6 +641,7 @@ export const LiveOverviewView = defineComponent({
         ]),
         h('span', { className: 'panel-meta' }, [ctxSummaryText]),
       ]),
+      ctxTierBar,
       ctxInspectorBar,
       ctxSegmentBar.el,
       ctxLegendGrid,
@@ -1009,7 +1098,59 @@ export const LiveOverviewView = defineComponent({
         });
       }
 
-      const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000);
+      const ctxCtrl = data.contextWindowControl || null;
+      const showCtxTierBar = Boolean(ctxCtrl?.installed);
+      patchAttr(ctxTierBar, 'hidden', !showCtxTierBar);
+      if (showCtxTierBar) {
+        const activeMode = String(ctxCtrl.mode || '256k').toLowerCase();
+        const activeLabel = formatContextTierLabel(activeMode);
+        const showLegacy1m = activeMode === '1m' || ctxCtrl.diskMode === '1m';
+        const activeErr = ctxSwitchErrorMsg || ctxCtrl.lastError || '';
+        const matchedTier = ctxTierButtons.find((t) => t.key === activeMode);
+
+        let statusText = matchedTier?.hint || `压缩水位 · ${activeLabel}`;
+        let statusTitle = '与 MetaBot 全局策略共享，点击右侧档位可随时切换';
+        if (isSwitchingContext) {
+          statusText = `切换至 ${switchingTargetLabel}…`;
+          statusTitle = statusText;
+        } else if (activeErr) {
+          statusText = activeErr;
+          statusTitle = activeErr;
+        } else if (!ctxCtrl.supported) {
+          statusText = '当前客户端版本特征暂未匹配';
+          statusTitle = statusText;
+        } else if (ctxCtrl.needsRestart) {
+          statusText = `已切 ${activeLabel} · 重启窗口生效`;
+          statusTitle = `磁盘二进制与全局策略已切换为 ${activeLabel}；当前运行中的 language_server 需重开反重力窗口后按新水位压缩`;
+        }
+
+        patchText(ctxTierStatusEl, statusText);
+        patchAttr(ctxTierStatusEl, 'title', statusTitle);
+        patchClasses(ctxTierStatusEl, {
+          'is-switching': isSwitchingContext,
+          'is-warn': !isSwitchingContext && !activeErr && Boolean(ctxCtrl.needsRestart),
+          'is-error': !isSwitchingContext && Boolean(activeErr),
+        });
+
+        for (const item of ctxTierButtons) {
+          if (item.legacyOnly) {
+            patchAttr(item.btn, 'hidden', !showLegacy1m);
+          }
+          const isActive = item.key === activeMode;
+          patchAttr(item.btn, 'disabled', !ctxCtrl.supported || isSwitchingContext);
+          patchAttr(item.btn, 'aria-pressed', isActive ? 'true' : 'false');
+          patchClasses(item.btn, {
+            'is-active': isActive,
+            'is-pending-restart': isActive && Boolean(ctxCtrl.needsRestart),
+          });
+        }
+      }
+
+      const fallbackLimit =
+        ctxCtrl?.installed && ctxCtrl?.runningMatchesDisk && ctxCtrl?.targetTokens
+          ? ctxCtrl.targetTokens
+          : 256000;
+      const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || fallbackLimit);
       const totalTokens = Number(ctx.totalTokens || 0);
       const usedPct =
         limitTokens > 0 ? Math.min(100, +((totalTokens / limitTokens) * 100).toFixed(1)) : 0;

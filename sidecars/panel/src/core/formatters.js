@@ -101,6 +101,43 @@ export function formatElapsedSec(seconds) {
   return `${h}h ${remM}m`;
 }
 
+export function formatStepDuration(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds)) || Number(seconds) <= 0) {
+    return '—';
+  }
+  const s = Number(seconds);
+  if (s < 60) {
+    return `${s.toFixed(1)}s`;
+  }
+  const roundedSec = Math.round(s);
+  const m = Math.floor(roundedSec / 60);
+  const remS = roundedSec % 60;
+  if (m < 60) {
+    return `${m}m${String(remS).padStart(2, '0')}s`;
+  }
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return `${h}h${String(remM).padStart(2, '0')}m`;
+}
+
+export function formatStepDurationDetail(step) {
+  const total = step?.totalDurationSec;
+  if (total == null || !Number.isFinite(Number(total)) || Number(total) <= 0) {
+    return step?.isComplete === false ? '该步仍在生成中' : '无有效单步耗时记录';
+  }
+  const parts = [`总耗时 ${Number(total).toFixed(2)}s`];
+  if (Number.isFinite(step?.ttftSec) && step.ttftSec >= 0) {
+    parts.push(`首字 ${Number(step.ttftSec).toFixed(2)}s`);
+  }
+  if (Number.isFinite(step?.thinkingDurationSec) && step.thinkingDurationSec > 0) {
+    parts.push(`思考 ${Number(step.thinkingDurationSec).toFixed(2)}s`);
+  }
+  if (Number.isFinite(step?.nativeStreamSec) && step.nativeStreamSec > 0) {
+    parts.push(`输出流 ${Number(step.nativeStreamSec).toFixed(2)}s`);
+  }
+  return parts.join(' · ');
+}
+
 /**
  * 归一化 Orchestrator 系列 ID 显示格式枚举（`'compact'` 精简代号 vs `'full'` 原始完整 ID，默认 `'compact'`）。
  *

@@ -453,7 +453,7 @@
   position: fixed;
   top: 42px;
   left: 12px;
-  width: min(492px, calc(100vw - 24px));
+  width: min(520px, calc(100vw - 24px));
   height: min(588px, calc(100vh - 54px));
   max-height: calc(100vh - 54px);
   display: flex;

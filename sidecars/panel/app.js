@@ -93,6 +93,13 @@ const SVG_ICON_DEFS = Object.freeze({
   close: [
     { tag: 'path', attrs: { d: 'M4.2 4.2l7.6 7.6M11.8 4.2l-7.6 7.6' } },
   ],
+  fingerprint: [
+    { tag: 'path', attrs: { d: 'M4.2 5.2a4.6 4.6 0 0 1 7.6 0' } },
+    { tag: 'path', attrs: { d: 'M3 8.2c0-2.8 2.2-5 5-5s5 2.2 5 5c0 1.7-.4 3.3-1.1 4.6' } },
+    { tag: 'path', attrs: { d: 'M5.5 8.3a2.5 2.5 0 0 1 5 0c0 1.8-.5 3.5-1.4 5' } },
+    { tag: 'path', attrs: { d: 'M8 8.2c0 1.9-.6 3.7-1.7 5.1' } },
+    { tag: 'path', attrs: { d: 'M3.6 10.8c-.3.8-.6 1.5-1 2.2' } },
+  ],
 });
 
 // --- src/icons/SvgIcon.js ---
@@ -632,6 +639,43 @@ function formatElapsedSec(seconds) {
   return `${h}h ${remM}m`;
 }
 
+function formatStepDuration(seconds) {
+  if (seconds == null || !Number.isFinite(Number(seconds)) || Number(seconds) <= 0) {
+    return '—';
+  }
+  const s = Number(seconds);
+  if (s < 60) {
+    return `${s.toFixed(1)}s`;
+  }
+  const roundedSec = Math.round(s);
+  const m = Math.floor(roundedSec / 60);
+  const remS = roundedSec % 60;
+  if (m < 60) {
+    return `${m}m${String(remS).padStart(2, '0')}s`;
+  }
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return `${h}h${String(remM).padStart(2, '0')}m`;
+}
+
+function formatStepDurationDetail(step) {
+  const total = step?.totalDurationSec;
+  if (total == null || !Number.isFinite(Number(total)) || Number(total) <= 0) {
+    return step?.isComplete === false ? '该步仍在生成中' : '无有效单步耗时记录';
+  }
+  const parts = [`总耗时 ${Number(total).toFixed(2)}s`];
+  if (Number.isFinite(step?.ttftSec) && step.ttftSec >= 0) {
+    parts.push(`首字 ${Number(step.ttftSec).toFixed(2)}s`);
+  }
+  if (Number.isFinite(step?.thinkingDurationSec) && step.thinkingDurationSec > 0) {
+    parts.push(`思考 ${Number(step.thinkingDurationSec).toFixed(2)}s`);
+  }
+  if (Number.isFinite(step?.nativeStreamSec) && step.nativeStreamSec > 0) {
+    parts.push(`输出流 ${Number(step.nativeStreamSec).toFixed(2)}s`);
+  }
+  return parts.join(' · ');
+}
+
 /**
  * 归一化 Orchestrator 系列 ID 显示格式枚举（`'compact'` 精简代号 vs `'full'` 原始完整 ID，默认 `'compact'`）。
  *
@@ -809,11 +853,12 @@ function callViaCdpBridge(bridge, path, { method, body, signal }) {
       if (idx >= 0) bridge.rpcQueue.splice(idx, 1);
     };
 
+    const rpcTimeoutMs = method && String(method).toUpperCase() !== 'GET' ? 30000 : 8000;
     const timeoutId = setTimeout(() => {
       bridge.rpcPending.delete(reqId);
       cleanupQueueItem();
       reject(new Error('CDP bridge timeout'));
-    }, 8000);
+    }, rpcTimeoutMs);
 
     const onAbort = () => {
       clearTimeout(timeoutId);
@@ -957,6 +1002,8 @@ const VIEW_TABS = Object.freeze([
 const uiStore = createReactiveStore({
   activeView: 'overview',
   stepsSubTab: 'steps', // 'steps' | 'models'
+  settingsSubTab: 'general', // 'general' | 'detector'
+  detectorProbeMode: 'fast', // 'fast' | 'exact'
   selectedAgentScope: 'all', // 'all' | 'main' | <subagent cascadeId>
   ctxInspectorAgentId: 'auto', // 'auto' | 'main' | <subagent cascadeId>
 });
@@ -1113,6 +1160,23 @@ function isEquivalentTelemetry(prev, next) {
     return false;
   }
 
+  // 2b. 比对 Antigravity 上下文压缩水位控制状态（与 MetaBot 双向共享策略）
+  const pCtxCtrl = prev.contextWindowControl;
+  const nCtxCtrl = next.contextWindowControl;
+  if (
+    pCtxCtrl?.supported !== nCtxCtrl?.supported ||
+    pCtxCtrl?.installed !== nCtxCtrl?.installed ||
+    pCtxCtrl?.mode !== nCtxCtrl?.mode ||
+    pCtxCtrl?.diskMode !== nCtxCtrl?.diskMode ||
+    pCtxCtrl?.targetTokens !== nCtxCtrl?.targetTokens ||
+    pCtxCtrl?.binaryState !== nCtxCtrl?.binaryState ||
+    pCtxCtrl?.needsRestart !== nCtxCtrl?.needsRestart ||
+    pCtxCtrl?.runningMatchesDisk !== nCtxCtrl?.runningMatchesDisk ||
+    pCtxCtrl?.lastError !== nCtxCtrl?.lastError
+  ) {
+    return false;
+  }
+
   // 3. 比对活跃会话的实时测速指标（会话 ID、步数、子代理拓扑、运行状态、TPS、TTFT、当前模型标识与费用）
   if (pAct?.cascadeId !== nAct?.cascadeId) return false;
   if (pAct?.stepCount !== nAct?.stepCount) return false;
@@ -1226,6 +1290,9 @@ function isEquivalentTelemetry(prev, next) {
         bs?.costUsd !== as?.costUsd ||
         bs?.tokPerSec !== as?.tokPerSec ||
         bs?.ttftSec !== as?.ttftSec ||
+        bs?.totalDurationSec !== as?.totalDurationSec ||
+        bs?.turnIndex !== as?.turnIndex ||
+        bs?.rootTurnIndex !== as?.rootTurnIndex ||
         bs?.outputTokens !== as?.outputTokens ||
         bs?.inputTokens !== as?.inputTokens ||
         bs?.cacheReadTokens !== as?.cacheReadTokens ||
@@ -1266,6 +1333,9 @@ function isEquivalentTelemetry(prev, next) {
       before.costUsd !== after.costUsd ||
       before.tokPerSec !== after.tokPerSec ||
       before.ttftSec !== after.ttftSec ||
+      before.totalDurationSec !== after.totalDurationSec ||
+      before.turnIndex !== after.turnIndex ||
+      before.rootTurnIndex !== after.rootTurnIndex ||
       before.outputTokens !== after.outputTokens ||
       before.inputTokens !== after.inputTokens ||
       before.cacheReadTokens !== after.cacheReadTokens ||
@@ -1633,6 +1703,186 @@ async function triggerPluginUpdate() {
     }
   }
   await fetchTelemetry({ force: true });
+  return res;
+}
+
+const CURRENT_WINDOW_MODEL_VALUE = '__current__';
+
+function normalizeHostButtonModelText(raw) {
+  return String(raw || '')
+    .replace(/[()[\]]/g, ' ')
+    .replace(/\b(?:new|fast|notice|beta|preview)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * 解析当前窗口关联的活跃会话 ID（优先用户选中会话，其次宿主 `/c/<uuid>` 路由，最后回退遥测活跃会话）。
+ *
+ * @returns {string}
+ */
+function resolveActiveWindowConversationId() {
+  const st = telemetryStore.getState();
+  const routeId = isWindowOverlayMode() ? extractHostRouteCascadeId() : '';
+  return (
+    st.selectedConversationId ||
+    routeId ||
+    st.hostRouteConversationId ||
+    st.telemetry?.activeConversation?.cascadeId ||
+    ''
+  );
+}
+
+/**
+ * 在主窗口双栖模式下提取输入框底部模型选择按钮的当前文本，以便在用户刚切换模型尚未发送消息时立即跟随。
+ *
+ * @param {Array<{ label?: string, modelId?: string }>} [knownModels=[]]
+ * @returns {string}
+ */
+function extractHostComposerModelHint(knownModels = []) {
+  if (typeof document === 'undefined' || !isWindowOverlayMode()) return '';
+  if (typeof document.querySelectorAll !== 'function') return '';
+  const knownNormSet = new Set(
+    (Array.isArray(knownModels) ? knownModels : [])
+      .map((m) => normalizeHostButtonModelText(m?.label || m?.modelId || ''))
+      .filter(Boolean)
+  );
+
+  let buttons;
+  try {
+    buttons = document.querySelectorAll('button, [role="button"]');
+  } catch {
+    return '';
+  }
+
+  const candidates = [];
+  for (const btn of buttons) {
+    if (!btn || typeof btn.closest !== 'function') continue;
+    if (
+      btn.closest('#ag-usage-monitor-capsule') ||
+      btn.closest('#ag-usage-monitor-portal') ||
+      btn.closest('[role="menu"]') ||
+      btn.closest('[role="listbox"]')
+    ) {
+      continue;
+    }
+    const role = String(btn.getAttribute?.('role') || '');
+    if (role === 'menuitem' || role === 'menuitemradio' || role === 'option') continue;
+
+    const rawText = String(btn.textContent || '').replace(/\s+/g, ' ').trim();
+    if (rawText.length < 4 || rawText.length > 60) continue;
+
+    const norm = normalizeHostButtonModelText(rawText);
+    if (!norm) continue;
+    const isKnown = knownNormSet.size > 0 && knownNormSet.has(norm);
+    const looksLikeAgModel = /^(?:gemini\s+\d|claude\s+(?:opus|sonnet|haiku)|orchestrator\b|gpt[- ]oss\b)/i.test(
+      norm
+    );
+    if (!isKnown && !looksLikeAgModel) continue;
+
+    let topY = 0;
+    if (typeof btn.getBoundingClientRect === 'function') {
+      const rect = btn.getBoundingClientRect();
+      if (rect.width <= 0 && rect.height <= 0) continue;
+      topY = rect.top;
+    }
+    const hasPopup = Boolean(btn.getAttribute?.('aria-haspopup'));
+    candidates.push({ rawText, isKnown, hasPopup, topY });
+  }
+
+  if (!candidates.length) return '';
+  candidates.sort((a, b) => {
+    if (a.isKnown !== b.isKnown) return a.isKnown ? -1 : 1;
+    if (a.hasPopup !== b.hasPopup) return a.hasPopup ? -1 : 1;
+    return b.topY - a.topY;
+  });
+  return candidates[0].rawText;
+}
+
+async function fetchModelDetectorStatus({ force = false, knownModels = [] } = {}) {
+  const params = new URLSearchParams();
+  const convId = resolveActiveWindowConversationId();
+  const hint = extractHostComposerModelHint(knownModels);
+  if (convId) params.set('conversationId', convId);
+  if (hint) params.set('composerModelHint', hint);
+  if (force) params.set('force', '1');
+  const qs = params.toString();
+  return callSidecarApi(`/api/model-detector/status${qs ? `?${qs}` : ''}`, {
+    method: 'GET',
+    abortKey: force ? 'model-detector-force' : 'model-detector-poll',
+  });
+}
+
+async function triggerModelDetection({
+  modelId = CURRENT_WINDOW_MODEL_VALUE,
+  probeMode = 'fast',
+  knownModels = [],
+} = {}) {
+  const convId = resolveActiveWindowConversationId();
+  const hint = extractHostComposerModelHint(knownModels);
+  return callSidecarApi('/api/model-detector/detect', {
+    method: 'POST',
+    body: {
+      modelId: modelId || CURRENT_WINDOW_MODEL_VALUE,
+      probeMode: probeMode === 'exact' ? 'exact' : 'fast',
+      conversationId: convId,
+      composerModelHint: hint,
+    },
+  });
+}
+
+async function cancelModelDetection({ knownModels = [] } = {}) {
+  const convId = resolveActiveWindowConversationId();
+  const hint = extractHostComposerModelHint(knownModels);
+  return callSidecarApi('/api/model-detector/cancel', {
+    method: 'POST',
+    body: {
+      conversationId: convId,
+      composerModelHint: hint,
+    },
+  });
+}
+
+async function syncModelDetector({ knownModels = [] } = {}) {
+  const convId = resolveActiveWindowConversationId();
+  const hint = extractHostComposerModelHint(knownModels);
+  const res = await callSidecarApi('/api/model-detector/sync', {
+    method: 'POST',
+    body: {
+      conversationId: convId,
+      composerModelHint: hint,
+    },
+  });
+  void fetchTelemetry({ force: true });
+  return res;
+}
+
+function formatContextTierLabel(mode) {
+  const norm = String(mode || '').trim().toLowerCase();
+  if (norm === '512k') return '512K';
+  if (norm === '768k') return '768K';
+  if (norm === '1m') return '1M';
+  return '256K';
+}
+
+async function switchContextWindow(mode) {
+  const res = await callSidecarApi('/api/context-window/switch', {
+    method: 'POST',
+    body: { mode },
+  });
+  if (res?.contextWindowControl) {
+    const st = telemetryStore.getState();
+    if (st.telemetry) {
+      telemetryStore.setState({
+        telemetry: {
+          ...st.telemetry,
+          contextWindowControl: res.contextWindowControl,
+        },
+      });
+    }
+  }
+  void fetchTelemetry({ force: false });
   return res;
 }
 
@@ -3366,26 +3616,33 @@ const TopSessionHeader = defineComponent({
 
       const actConv = telemetry?.activeConversation;
       const convs = telemetry?.conversations || [];
-      const hostRouteId = telSt.hostRouteConversationId || '';
-      const hostMatchedConv = hostRouteId
-        ? convs.find((c) => c.cascadeId === hostRouteId) ||
-          (actConv?.cascadeId === hostRouteId ? actConv : null)
+      const rawHostRouteId = telSt.hostRouteConversationId || '';
+      const rawHostMatched = rawHostRouteId
+        ? convs.find((c) => c.cascadeId === rawHostRouteId) ||
+          (actConv?.cascadeId === rawHostRouteId ? actConv : null)
         : null;
-      const defaultOptLabel = hostRouteId
-        ? hostMatchedConv?.title
+      const isHostProbe =
+        Boolean(rawHostMatched?.title) &&
+        String(rawHostMatched.title).trim().startsWith('[模型检测探针]');
+      const hostRouteId = rawHostRouteId && !isHostProbe ? rawHostRouteId : '';
+      const hostMatchedConv = hostRouteId ? rawHostMatched : null;
+      const defaultOptLabel = hostMatchedConv
+        ? hostMatchedConv.title
           ? `当前窗口 (${hostMatchedConv.title})`
           : `当前窗口 (${hostRouteId.slice(0, 8)})`
-        : convs[0]?.title
-          ? `最新 (${convs[0].title})`
-          : '跟随最新会话';
-      const defaultOptMeta = hostRouteId
-        ? hostMatchedConv
-          ? formatConvOptionMeta({
-              stepCount: hostMatchedConv.stepCount,
-              subagentCount: hostMatchedConv.subagentCount,
-              totalStepCount: hostMatchedConv.totalStepCount ?? hostMatchedConv.totalStepsAllAgents,
-            })
-          : ''
+        : actConv?.title && actConv.title !== '当前会话'
+          ? `当前会话 (${actConv.title})`
+          : convs[0]?.title
+            ? `最新 (${convs[0].title})`
+            : hostRouteId
+              ? `当前窗口 (${hostRouteId.slice(0, 8)})`
+              : '跟随最新会话';
+      const defaultOptMeta = hostMatchedConv
+        ? formatConvOptionMeta({
+            stepCount: hostMatchedConv.stepCount,
+            subagentCount: hostMatchedConv.subagentCount,
+            totalStepCount: hostMatchedConv.totalStepCount ?? hostMatchedConv.totalStepsAllAgents,
+          })
         : convs[0]
           ? formatConvOptionMeta(convs[0])
           : '';
@@ -4018,6 +4275,92 @@ const LiveOverviewView = defineComponent({
     const ctxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
     const ctxSegmentBar = ContextSegmentMeter({ context: {} });
 
+    const ctxTierStatusEl = h('span', {
+      className: 'ctx-tier-status',
+      text: '压缩水位 · 原版',
+    });
+    const ctxTierDefs = [
+      {
+        key: '256k',
+        label: '256K',
+        hint: '压缩水位 · 原版',
+        title: '切回 256K 官方原版水位 (256,000 tokens · 从原版备份字节级还原)',
+      },
+      {
+        key: '512k',
+        label: '512K',
+        hint: '压缩水位 · 均衡',
+        title: '切换至 512K 日常均衡水位 (524,288 tokens · 兼顾缓存命中与跨模块记忆)',
+      },
+      {
+        key: '768k',
+        label: '768K',
+        hint: '压缩水位 · 深度',
+        title: '切换至 768K 深度攻坚水位 (786,432 tokens · 预留 256Ki 思考与输出安全区)',
+      },
+      {
+        key: '1m',
+        label: '1M',
+        hint: '压缩水位 · 极限',
+        title: '1M 兼容极限水位 (983,040 tokens)',
+        legacyOnly: true,
+      },
+    ];
+    let isSwitchingContext = false;
+    let switchingTargetLabel = '';
+    let ctxSwitchErrorMsg = '';
+
+    const ctxTierButtons = ctxTierDefs.map((tier) => {
+      const btn = h('button', {
+        type: 'button',
+        className: 'ctx-tier-btn',
+        title: tier.title,
+        text: tier.label,
+        hidden: Boolean(tier.legacyOnly),
+      });
+      btn.onclick = async () => {
+        if (isSwitchingContext) return;
+        const curCtrl = latestData?.contextWindowControl;
+        if (
+          curCtrl &&
+          curCtrl.mode === tier.key &&
+          curCtrl.diskMode === tier.key &&
+          !ctxSwitchErrorMsg
+        ) {
+          return;
+        }
+        isSwitchingContext = true;
+        switchingTargetLabel = tier.label;
+        ctxSwitchErrorMsg = '';
+        if (latestData) renderData(latestData);
+        try {
+          const res = await switchContextWindow(tier.key);
+          if (!res?.ok) {
+            ctxSwitchErrorMsg = res?.error || '切换失败';
+          }
+        } catch (err) {
+          ctxSwitchErrorMsg = err?.message || '切换请求失败';
+        } finally {
+          isSwitchingContext = false;
+          switchingTargetLabel = '';
+          const nextTel = telemetryStore.getState().telemetry || latestData;
+          if (nextTel) renderData(nextTel);
+        }
+      };
+      return { ...tier, btn };
+    });
+
+    const ctxTierPillsEl = h(
+      'div',
+      { className: 'ctx-tier-pills', role: 'group', 'aria-label': '上下文压缩水位档位' },
+      ctxTierButtons.map((t) => t.btn)
+    );
+    const ctxTierBar = h(
+      'div',
+      { className: 'ctx-tier-bar', hidden: true },
+      [ctxTierStatusEl, ctxTierPillsEl]
+    );
+
     const ctxPillGroup = h('div', { className: 'ctx-pill-group' });
     const ctxInspectorBar = h(
       'div',
@@ -4053,6 +4396,7 @@ const LiveOverviewView = defineComponent({
         ]),
         h('span', { className: 'panel-meta' }, [ctxSummaryText]),
       ]),
+      ctxTierBar,
       ctxInspectorBar,
       ctxSegmentBar.el,
       ctxLegendGrid,
@@ -4509,7 +4853,59 @@ const LiveOverviewView = defineComponent({
         });
       }
 
-      const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000);
+      const ctxCtrl = data.contextWindowControl || null;
+      const showCtxTierBar = Boolean(ctxCtrl?.installed);
+      patchAttr(ctxTierBar, 'hidden', !showCtxTierBar);
+      if (showCtxTierBar) {
+        const activeMode = String(ctxCtrl.mode || '256k').toLowerCase();
+        const activeLabel = formatContextTierLabel(activeMode);
+        const showLegacy1m = activeMode === '1m' || ctxCtrl.diskMode === '1m';
+        const activeErr = ctxSwitchErrorMsg || ctxCtrl.lastError || '';
+        const matchedTier = ctxTierButtons.find((t) => t.key === activeMode);
+
+        let statusText = matchedTier?.hint || `压缩水位 · ${activeLabel}`;
+        let statusTitle = '与 MetaBot 全局策略共享，点击右侧档位可随时切换';
+        if (isSwitchingContext) {
+          statusText = `切换至 ${switchingTargetLabel}…`;
+          statusTitle = statusText;
+        } else if (activeErr) {
+          statusText = activeErr;
+          statusTitle = activeErr;
+        } else if (!ctxCtrl.supported) {
+          statusText = '当前客户端版本特征暂未匹配';
+          statusTitle = statusText;
+        } else if (ctxCtrl.needsRestart) {
+          statusText = `已切 ${activeLabel} · 重启窗口生效`;
+          statusTitle = `磁盘二进制与全局策略已切换为 ${activeLabel}；当前运行中的 language_server 需重开反重力窗口后按新水位压缩`;
+        }
+
+        patchText(ctxTierStatusEl, statusText);
+        patchAttr(ctxTierStatusEl, 'title', statusTitle);
+        patchClasses(ctxTierStatusEl, {
+          'is-switching': isSwitchingContext,
+          'is-warn': !isSwitchingContext && !activeErr && Boolean(ctxCtrl.needsRestart),
+          'is-error': !isSwitchingContext && Boolean(activeErr),
+        });
+
+        for (const item of ctxTierButtons) {
+          if (item.legacyOnly) {
+            patchAttr(item.btn, 'hidden', !showLegacy1m);
+          }
+          const isActive = item.key === activeMode;
+          patchAttr(item.btn, 'disabled', !ctxCtrl.supported || isSwitchingContext);
+          patchAttr(item.btn, 'aria-pressed', isActive ? 'true' : 'false');
+          patchClasses(item.btn, {
+            'is-active': isActive,
+            'is-pending-restart': isActive && Boolean(ctxCtrl.needsRestart),
+          });
+        }
+      }
+
+      const fallbackLimit =
+        ctxCtrl?.installed && ctxCtrl?.runningMatchesDisk && ctxCtrl?.targetTokens
+          ? ctxCtrl.targetTokens
+          : 256000;
+      const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || fallbackLimit);
       const totalTokens = Number(ctx.totalTokens || 0);
       const usedPct =
         limitTokens > 0 ? Math.min(100, +((totalTokens / limitTokens) * 100).toFixed(1)) : 0;
@@ -5352,24 +5748,24 @@ const StepsDetailView = defineComponent({
       },
     });
 
-    // --- 子表 1：单步明细表（列定义：步序、模型、吞吐速度、首字延迟、上下文/输出、缓存命中率、单步费用） ---
+    // --- 子表 1：单步明细表（列定义：步序、模型、吞吐速度、首字延迟、单步耗时、上下文/输出、缓存命中率、单步费用） ---
     const stepsTbody = h('tbody');
-    const stepsTablePane = h('div', { className: 'table-viewport' }, [
-      h('table', { className: 'data-table steps-data-table' }, [
-        h('thead', {}, [
-          h('tr', {}, [
-            h('th', { className: 'step-col-head', text: '步序' }),
-            h('th', { text: '模型' }),
-            h('th', { text: '速度' }),
-            h('th', { text: '首字' }),
-            h('th', { text: '上下文 / 输出' }),
-            h('th', { text: '缓存' }),
-            h('th', { text: '费用' }),
-          ]),
+    const stepsTableEl = h('table', { className: 'data-table steps-data-table' }, [
+      h('thead', {}, [
+        h('tr', {}, [
+          h('th', { className: 'step-col-head', text: '步序' }),
+          h('th', { className: 'col-model', text: '模型' }),
+          h('th', { className: 'col-speed', text: '速度' }),
+          h('th', { className: 'col-ttft', text: '首字' }),
+          h('th', { className: 'col-dur', text: '耗时' }),
+          h('th', { className: 'col-ctx', text: '上下文 / 输出' }),
+          h('th', { className: 'col-cache', text: '缓存' }),
+          h('th', { className: 'col-cost', text: '费用' }),
         ]),
-        stepsTbody,
       ]),
+      stepsTbody,
     ]);
+    const stepsTablePane = h('div', { className: 'table-viewport' }, [stepsTableEl]);
     const stepsScroll = CustomScrollbar({
       contentEl: stepsTablePane,
       className: 'table-scroll-host',
@@ -5578,13 +5974,15 @@ const StepsDetailView = defineComponent({
         };
       });
 
+      patchClasses(stepsTableEl, { 'has-subagents': hasSubagents });
+
       // 1. 单步测速表增量对账：以 `<agentCascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
       patchKeyedList(stepsTbody, decoratedSteps, {
         keyFn: (item) => item.rowKey,
         sigFn: (item) => {
           const { st } = item;
           const disp = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
-          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}:${item.hasTurn}:${item.hasUp}:${item.hasDown}:${item.isStart}:${item.isLatest}:${item.prompt}`;
+          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.totalDurationSec}:${st.thinkingDurationSec}:${st.nativeStreamSec}:${st.isComplete}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}:${item.hasTurn}:${item.hasUp}:${item.hasDown}:${item.isStart}:${item.isLatest}:${item.prompt}`;
         },
         createRow: () => {
           const railLineEl = h('span', { className: 'turn-rail-line', hidden: true });
@@ -5606,25 +6004,26 @@ const StepsDetailView = defineComponent({
             stepNumText,
           ]);
 
-          const tdModel = h('td', {
-            style: 'max-width: 140px; overflow: hidden; text-overflow: ellipsis;',
-          });
+          const tdModel = h('td', { className: 'col-model model-cell' });
           const speedMain = h('strong', {
             className: 'cell-value accent-speed',
             style: 'font-size: 11px;',
           });
           const speedReason = h('div', { className: 'text-muted', style: 'font-size: 9.5px;' });
-          const tdSpeed = h('td', {}, [speedMain, speedReason]);
+          const tdSpeed = h('td', { className: 'col-speed' }, [speedMain, speedReason]);
 
-          const tdTtft = h('td');
-          const tdCtx = h('td');
+          const tdTtft = h('td', { className: 'col-ttft text-muted' });
+          const durMain = h('span', { className: 'dur-main cell-value' });
+          const durSubTtft = h('div', { className: 'dur-sub-ttft text-muted', hidden: true });
+          const tdDur = h('td', { className: 'col-dur' }, [durMain, durSubTtft]);
+          const tdCtx = h('td', { className: 'col-ctx' });
           const tdCache = h('td', {
-            className: 'cell-value accent-ok',
+            className: 'col-cache cell-value accent-ok',
             style: 'font-size: 11px;',
           });
-          const tdCost = h('td', { style: 'font-weight: 600;' });
+          const tdCost = h('td', { className: 'col-cost', style: 'font-weight: 600;' });
 
-          const tr = h('tr', {}, [tdStep, tdModel, tdSpeed, tdTtft, tdCtx, tdCache, tdCost]);
+          const tr = h('tr', {}, [tdStep, tdModel, tdSpeed, tdTtft, tdDur, tdCtx, tdCache, tdCost]);
           return {
             el: tr,
             refs: {
@@ -5638,6 +6037,9 @@ const StepsDetailView = defineComponent({
               speedMain,
               speedReason,
               tdTtft,
+              tdDur,
+              durMain,
+              durSubTtft,
               tdCtx,
               tdCache,
               tdCost,
@@ -5704,9 +6106,17 @@ const StepsDetailView = defineComponent({
           patchAttr(refs.speedReason, 'hidden', !reason);
 
           patchText(refs.tdTtft, formatMetric(st.ttftSec, 's'));
-          patchText(
+          patchText(refs.durMain, formatStepDuration(st.totalDurationSec));
+          const subTtft = Number.isFinite(st.ttftSec) ? `首 ${st.ttftSec.toFixed(1)}s` : '';
+          patchText(refs.durSubTtft, subTtft);
+          patchAttr(refs.durSubTtft, 'hidden', !subTtft);
+          patchAttr(refs.tdDur, 'title', formatStepDurationDetail(st));
+          const ctxStr = `${formatTokens(st.contextTokens)} / +${Number(st.outputTokens || 0)}`;
+          patchText(refs.tdCtx, ctxStr);
+          patchAttr(
             refs.tdCtx,
-            `${formatTokens(st.contextTokens)} / +${Number(st.outputTokens || 0)}`
+            'title',
+            `上下文 ${formatTokens(st.contextTokens)} · 输出 +${Number(st.outputTokens || 0)} · 缓存 ${Number(st.cacheHitPct ?? 0)}%`
           );
           patchText(refs.tdCache, `${Number(st.cacheHitPct ?? 0)}%`);
 
@@ -5830,13 +6240,25 @@ const StepsDetailView = defineComponent({
 
 // --- src/views/SettingsView.js ---
 /**
- * @fileoverview View 4: SettingsView (系统设置视图).
- * 采用定制的 `CustomSelect` 与 `SegmentedControl` 替代所有原生表单控件，分为三个单层细线设置面板：
- * 1. 常规设置：配置面板挂载方式（双栖挂载 / 仅右侧辅助栏）、模型名称格式（精简代号 / 原始模型 ID）与 Orchestrator 系列 ID 格式；
- * 2. 顶部栏定制：控制左侧「实时运行会话」入口开关，以及自由定义右侧精简胶囊三个数值槽位的显示内容与左右顺序；
- * 3. 版本更新：配置插件自动更新策略、手动同步云端模型价格表，以及检查并执行 Git/ZIP 双模式插件升级。
+ * @fileoverview View 4: SettingsView (偏好设置与模型检测视图).
+ * 顶部通过二级分段切换器在「常规偏好」与「模型检测」之间无缝切换：
+ * - 「常规偏好」包含三个细线设置面板：常规设置、顶部栏定制、版本更新；
+ * - 「模型检测」专为反重力环境定制：仅允许选择反重力当前可用模型（默认跟随当前窗口模型），
+ *   支持自动与手动同步宿主最新模型目录及 ModelDial 数字指纹库，异步并发执行 3 路无语义整数探针比对模型真身。
  */
 
+
+/** 偏好设置顶部二级分区选项 */
+const SETTINGS_SUBTAB_OPTIONS = [
+  { value: 'general', label: '常规偏好' },
+  { value: 'detector', label: '模型检测' },
+];
+
+/** 模型真身探针采样通道选项（默认极速同权轻思考，避免高阶推理思维链阻塞） */
+const DETECTOR_PROBE_MODE_OPTIONS = [
+  { value: 'fast', label: '极速同权' },
+  { value: 'exact', label: '原档直测' },
+];
 
 /** 步骤明细表中的模型名称显示方式可选项 */
 const STEP_MODEL_DISPLAY_OPTIONS = [
@@ -5898,6 +6320,37 @@ function formatSyncTimeText(tsMs, updatedAt) {
   return '默认价格';
 }
 
+function formatDetectorBankSubtext(bank) {
+  if (!bank || !bank.ready) {
+    return bank?.lastSyncError ? '指纹库异常' : '正在加载指纹库…';
+  }
+  const srcText = bank.source === 'remote' ? '云端热更新' : '内置最新包';
+  const datePart = bank.builtAt ? String(bank.builtAt).slice(0, 10) : '';
+  if (Number(bank.lastCheckedAtMs) > 0) {
+    const d = new Date(Number(bank.lastCheckedAtMs));
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${srcText} · 核验 ${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  return datePart ? `${srcText} · ${datePart}` : srcText;
+}
+
+function formatDetectorOptionMeta(model) {
+  if (!model) return '';
+  if (model.isQuotaExhausted) return '无额度';
+  if (Number.isFinite(model.remainingPct)) {
+    return `余 ${model.remainingPct}%`;
+  }
+  return model.tagTitle || '';
+}
+
+function formatDetectorHistoryClock(isoStr) {
+  const ms = Date.parse(String(isoStr || ''));
+  if (!Number.isFinite(ms)) return '';
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 const SettingsView = defineComponent({
   name: 'SettingsView',
   setup({ onCleanup }) {
@@ -5910,10 +6363,13 @@ const SettingsView = defineComponent({
     let statusTimer = null;
     let topbarTimer = null;
     let cloudTimer = null;
+    let detectorFeedbackTimer = null;
+    let detectorPollTimer = null;
 
     const saveStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
     const topbarStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
     const cloudStatusMsg = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
+    const detectorStatusMsg = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
 
     /** 在常规设置面板右上角展示短暂的保存状态提示 */
     function showSaveFeedback(text) {
@@ -5959,6 +6415,32 @@ const SettingsView = defineComponent({
         }, autoClearMs);
       }
     }
+
+    /** 在模型检测面板右上角展示同步或检测状态提示 */
+    function showDetectorFeedback(text, autoClearMs = 3500) {
+      if (detectorFeedbackTimer) {
+        clearTimeout(detectorFeedbackTimer);
+        detectorFeedbackTimer = null;
+      }
+      patchText(detectorStatusMsg, text);
+      if (autoClearMs > 0) {
+        detectorFeedbackTimer = setTimeout(() => {
+          detectorFeedbackTimer = null;
+          patchText(detectorStatusMsg, '');
+        }, autoClearMs);
+      }
+    }
+
+    // --- 顶部二级分区切换条：常规偏好 | 模型检测 ---
+    const settingsSubTabSwitch = SegmentedControl({
+      ariaLabel: '偏好设置分区切换',
+      modelValue: uiStore.getState().settingsSubTab || 'general',
+      options: SETTINGS_SUBTAB_OPTIONS,
+      onUpdateModelValue: (nextSubTab) => {
+        uiStore.setState({ settingsSubTab: nextSubTab === 'detector' ? 'detector' : 'general' });
+      },
+    });
+    const settingsSubNavBar = h('div', { className: 'settings-subnav' }, [settingsSubTabSwitch.el]);
 
     // --- 面板 1：常规设置 ---
     const windowMountSelect = CustomSelect({
@@ -6362,12 +6844,563 @@ const SettingsView = defineComponent({
       h('div', { className: 'cloud-actions-row' }, [syncPricingBtn, updatePluginBtn]),
     ]);
 
+    const generalGroup = h('div', { className: 'settings-tab-group' }, [
+      generalPanel,
+      topbarPanel,
+      cloudPanel,
+    ]);
+
+    // =========================================================================
+    // 分区 2：模型真身检测（仅限反重力可用模型，默认跟随当前窗口模型）
+    // =========================================================================
+    let selectedDetectorModelId = CURRENT_WINDOW_MODEL_VALUE;
+    let detectorSnapshot = null;
+    let inspectedHistoryId = '';
+    let wasDetectorRunning = false;
+
+    const detectorModelSelect = CustomSelect({
+      modelValue: CURRENT_WINDOW_MODEL_VALUE,
+      icon: 'fingerprint',
+      options: [{ value: CURRENT_WINDOW_MODEL_VALUE, label: '当前窗口模型 (自动识别)', meta: '默认' }],
+      onUpdateModelValue: (val) => {
+        selectedDetectorModelId = val || CURRENT_WINDOW_MODEL_VALUE;
+        renderDetectorSnapshot(detectorSnapshot);
+      },
+    });
+
+    const detectorProbeModeSwitch = SegmentedControl({
+      ariaLabel: '探针采样通道选择',
+      modelValue: uiStore.getState().detectorProbeMode || 'fast',
+      options: DETECTOR_PROBE_MODE_OPTIONS,
+      onUpdateModelValue: (nextMode) => {
+        const mode = nextMode === 'exact' ? 'exact' : 'fast';
+        uiStore.setState({ detectorProbeMode: mode });
+        detectorProbeModeSwitch.setValue(mode);
+      },
+    });
+
+    const agModelCountVal = h('strong', { className: 'cell-value', text: '—' });
+    const agModelRefSub = h('span', { className: 'cell-sub', text: '同步反重力模型中…' });
+    const bankCountVal = h('strong', { className: 'cell-value', text: '—' });
+    const bankSyncSub = h('span', { className: 'cell-sub', text: '读取指纹库…' });
+
+    const syncDetectorBtnText = h('span', { text: '更新指纹库' });
+    const syncDetectorBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-secondary',
+        onClick: async () => {
+          patchAttr(syncDetectorBtn, 'disabled', true);
+          patchAttr(startDetectBtn, 'disabled', true);
+          patchText(syncDetectorBtnText, '同步中…');
+          showDetectorFeedback('正在同步指纹库与宿主模型…', 0);
+          try {
+            const res = await syncModelDetector({
+              knownModels: detectorSnapshot?.availableModels || [],
+            });
+            if (res) {
+              detectorSnapshot = res;
+              renderDetectorSnapshot(res);
+            }
+            const sr = res?.syncResult;
+            const agCount = Array.isArray(res?.availableModels) ? res.availableModels.length : 0;
+            if (sr?.error) {
+              showDetectorFeedback(`已同步 ${agCount} 个模型 · 指纹库离线可用`, 4500);
+            } else if (sr?.updated) {
+              showDetectorFeedback(
+                `指纹库已更新 (${res?.bank?.modelCount || 0} 参考) · ${agCount} 个宿主模型`,
+                4000
+              );
+            } else {
+              showDetectorFeedback(`指纹库已是最新 · 已同步 ${agCount} 个反重力模型`, 3500);
+            }
+          } catch (err) {
+            showDetectorFeedback(err?.message || '同步失败，使用本地指纹库', 4500);
+          } finally {
+            patchText(syncDetectorBtnText, '更新指纹库');
+            renderDetectorSnapshot(detectorSnapshot);
+          }
+        },
+      },
+      [createSvgIcon('refresh', { size: 12 }), syncDetectorBtnText]
+    );
+
+    const startDetectBtnText = h('span', { text: '开始检测' });
+    const startDetectBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-primary',
+        onClick: async () => {
+          patchAttr(startDetectBtn, 'disabled', true);
+          patchAttr(syncDetectorBtn, 'disabled', true);
+          showDetectorFeedback('正在启动探针…', 0);
+          try {
+            const res = await triggerModelDetection({
+              modelId: selectedDetectorModelId,
+              probeMode: uiStore.getState().detectorProbeMode || 'fast',
+              knownModels: detectorSnapshot?.availableModels || [],
+            });
+            inspectedHistoryId = '';
+            if (res?.status) {
+              wasDetectorRunning = Boolean(res.status.running?.active);
+              detectorSnapshot = res.status;
+              renderDetectorSnapshot(res.status);
+              ensureDetectorPollLoop();
+            }
+            showDetectorFeedback('', 0);
+          } catch (err) {
+            showDetectorFeedback(err?.message || '启动检测失败', 4500);
+            patchAttr(startDetectBtn, 'disabled', false);
+            patchAttr(syncDetectorBtn, 'disabled', false);
+          }
+        },
+      },
+      [createSvgIcon('bolt', { size: 12 }), startDetectBtnText]
+    );
+
+    const detectorIdleActionsRow = h('div', { className: 'cloud-actions-row' }, [
+      syncDetectorBtn,
+      startDetectBtn,
+    ]);
+
+    const detectorProgressPhase = h('span', {
+      className: 'detector-progress-phase',
+      text: '正在并发启动 3 路无语义整数探针…',
+    });
+    const detectorProgressElapsed = h('span', {
+      className: 'detector-progress-elapsed',
+      text: '0.0s',
+    });
+    const detectorProgressFill = h('div', { className: 'progress-fill' });
+    patchStyleVar(detectorProgressFill, '--fill-w', '12%');
+
+    const cancelDetectBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-secondary',
+        onClick: async () => {
+          patchAttr(cancelDetectBtn, 'disabled', true);
+          try {
+            const res = await cancelModelDetection({
+              knownModels: detectorSnapshot?.availableModels || [],
+            });
+            stopDetectorPollLoop();
+            wasDetectorRunning = false;
+            if (res?.status) {
+              detectorSnapshot = res.status;
+              renderDetectorSnapshot(res.status);
+            }
+            showDetectorFeedback('已取消检测', 2200);
+          } catch (err) {
+            showDetectorFeedback(err?.message || '取消失败', 3000);
+          } finally {
+            patchAttr(cancelDetectBtn, 'disabled', false);
+          }
+        },
+      },
+      [createSvgIcon('close', { size: 12 }), h('span', { text: '取消检测' })]
+    );
+
+    const detectorProgressBox = h(
+      'div',
+      { className: 'detector-progress-box', hidden: true },
+      [
+        h('div', { className: 'detector-progress-head' }, [
+          detectorProgressPhase,
+          detectorProgressElapsed,
+        ]),
+        h('div', { className: 'progress-track' }, [detectorProgressFill]),
+        h('div', { className: 'cloud-actions-row' }, [cancelDetectBtn]),
+      ]
+    );
+
+    const detectorControlPanel = h('section', { className: 'panel' }, [
+      h('div', { className: 'panel-header' }, [
+        h('span', { className: 'panel-title' }, [
+          createSvgIcon('fingerprint', { size: 13 }),
+          h('span', { text: '模型真身检测' }),
+        ]),
+        detectorStatusMsg,
+      ]),
+      h('div', { className: 'form-row' }, [
+        h('span', { className: 'form-label', text: '测试模型 (仅限反重力可用模型)' }),
+        h('div', { className: 'detector-select-box' }, [detectorModelSelect.el]),
+      ]),
+      h('div', { className: 'settings-inline-row detector-mode-row' }, [
+        h('span', { className: 'form-label', text: '采样通道' }),
+        detectorProbeModeSwitch.el,
+      ]),
+      h('div', { className: 'dual-grid' }, [
+        h('div', { className: 'matrix-cell' }, [
+          h('span', { className: 'cell-label', text: '反重力模型' }),
+          agModelCountVal,
+          agModelRefSub,
+        ]),
+        h('div', { className: 'matrix-cell' }, [
+          h('span', { className: 'cell-label', text: '数字指纹库' }),
+          bankCountVal,
+          bankSyncSub,
+        ]),
+      ]),
+      detectorIdleActionsRow,
+      detectorProgressBox,
+    ]);
+
+    // --- 检测结论与候选排名面板 ---
+    const verdictMetaText = h('span', { className: 'panel-meta', text: '' });
+    const detectorEmptyNote = h('div', {
+      className: 'detector-empty-note',
+      text: '默认检测当前窗口模型。通过 3 路多语种无语义整数分布数学比对模型底层权重，不污染当前对话上下文。',
+    });
+
+    const verdictStatusTag = h('span', { className: 'status-tag', text: '真身一致' });
+    const verdictTargetText = h('span', { className: 'detector-verdict-target', text: '' });
+    const verdictHeadline = h('div', { className: 'detector-headline', text: '' });
+    const verdictDetail = h('div', { className: 'detector-detail', text: '' });
+
+    const candidateListEl = h('div', { className: 'detector-candidates', hidden: true });
+    const historyListEl = h('div', { className: 'detector-history-list' });
+    const historySectionEl = h(
+      'div',
+      { className: 'detector-history-section', hidden: true },
+      [
+        h('span', { className: 'detector-history-label', text: '最近记录' }),
+        historyListEl,
+      ]
+    );
+
+    const detectorVerdictBody = h(
+      'div',
+      { className: 'detector-verdict-body', hidden: true },
+      [
+        h('div', { className: 'detector-verdict-box' }, [
+          h('div', { className: 'detector-verdict-top' }, [
+            h('div', { className: 'detector-verdict-left' }, [
+              verdictStatusTag,
+              verdictTargetText,
+            ]),
+          ]),
+          verdictHeadline,
+          verdictDetail,
+        ]),
+        candidateListEl,
+        historySectionEl,
+      ]
+    );
+
+    const detectorResultPanel = h('section', { className: 'panel' }, [
+      h('div', { className: 'panel-header' }, [
+        h('span', { className: 'panel-title' }, [
+          createSvgIcon('pulse', { size: 13 }),
+          h('span', { text: '检测结论' }),
+        ]),
+        verdictMetaText,
+      ]),
+      detectorEmptyNote,
+      detectorVerdictBody,
+    ]);
+
+    const detectorGroup = h(
+      'div',
+      { className: 'settings-tab-group', hidden: true },
+      [detectorControlPanel, detectorResultPanel]
+    );
+
+    function renderDetectorSnapshot(snap) {
+      if (!snap) return;
+      const models = Array.isArray(snap.availableModels) ? snap.availableModels : [];
+      const curWin = snap.currentWindowModel || null;
+      const bank = snap.bank || null;
+      const running = snap.running?.active ? snap.running : null;
+
+      if (
+        selectedDetectorModelId !== CURRENT_WINDOW_MODEL_VALUE &&
+        models.length > 0 &&
+        !models.some((m) => m.modelId === selectedDetectorModelId)
+      ) {
+        selectedDetectorModelId = CURRENT_WINDOW_MODEL_VALUE;
+      }
+
+      const curLabel = curWin?.label
+        ? `当前窗口 · ${curWin.label}`
+        : '当前窗口模型 (自动识别)';
+      const curMeta = curWin ? formatDetectorOptionMeta(curWin) || '默认' : '默认';
+
+      const selectOptions = [
+        {
+          value: CURRENT_WINDOW_MODEL_VALUE,
+          label: curLabel,
+          meta: curMeta,
+        },
+        ...models.map((m) => ({
+          value: m.modelId,
+          label: m.label,
+          meta: formatDetectorOptionMeta(m),
+        })),
+      ];
+      detectorModelSelect.setProps({
+        modelValue: selectedDetectorModelId,
+        options: selectOptions,
+      });
+
+      const activeTarget =
+        selectedDetectorModelId === CURRENT_WINDOW_MODEL_VALUE
+          ? curWin || models[0] || null
+          : models.find((m) => m.modelId === selectedDetectorModelId) || null;
+
+      patchText(agModelCountVal, models.length > 0 ? `${models.length} 个可选` : '读取中…');
+      if (activeTarget) {
+        const refText =
+          activeTarget.reference && activeTarget.reference !== 'unknown'
+            ? `对标 ${activeTarget.reference}`
+            : '开放识别 · 自动同步';
+        patchText(agModelRefSub, refText);
+      } else {
+        patchText(agModelRefSub, '自动同步宿主模型');
+      }
+
+      patchText(
+        bankCountVal,
+        bank?.ready ? `${bank.modelCount || 0} 个参考` : '未就绪'
+      );
+      patchText(bankSyncSub, formatDetectorBankSubtext(bank));
+
+      const isBusy = Boolean(running);
+      patchAttr(detectorIdleActionsRow, 'hidden', isBusy);
+      patchAttr(detectorProgressBox, 'hidden', !isBusy);
+      patchAttr(syncDetectorBtn, 'disabled', isBusy || Boolean(bank?.isSyncing));
+      patchAttr(startDetectBtn, 'disabled', isBusy || !bank?.ready || models.length === 0);
+
+      if (running) {
+        patchText(
+          detectorProgressPhase,
+          running.phaseText || `正在检测 ${running.targetLabel || ''}…`
+        );
+        const sec = ((running.elapsedMs || 0) / 1000).toFixed(1);
+        patchText(detectorProgressElapsed, `${sec}s`);
+        const completed = Number(running.completedProbes || 0);
+        const total = Math.max(1, Number(running.totalProbes || 3));
+        const liveNums = Number(running.liveParsedNumbers || 0);
+        const expectedNums = Math.max(300, Number(running.expectedTotalNumbers || 900));
+        const activeThinking = Number(running.activeThinkingProbes || 0);
+        let pct = 14;
+        if (completed >= total) {
+          pct = 94;
+        } else {
+          const donePct = (completed / total) * 74;
+          const streamPct = Math.min(0.95, liveNums / expectedNums) * 74;
+          const thinkBoost = activeThinking > 0 ? Math.min(18, activeThinking * 5) : 0;
+          pct = Math.round(14 + Math.max(donePct, streamPct, thinkBoost));
+        }
+        patchStyleVar(detectorProgressFill, '--fill-w', `${Math.max(12, Math.min(95, pct))}%`);
+      }
+
+      const history = Array.isArray(snap.history) ? snap.history : [];
+      const activeRecord =
+        (inspectedHistoryId && history.find((item) => item?.id === inspectedHistoryId)) ||
+        snap.latestResult ||
+        history[0] ||
+        null;
+
+      if (!activeRecord) {
+        patchAttr(detectorEmptyNote, 'hidden', false);
+        patchAttr(detectorVerdictBody, 'hidden', true);
+        patchText(verdictMetaText, '');
+      } else {
+        patchAttr(detectorEmptyNote, 'hidden', true);
+        patchAttr(detectorVerdictBody, 'hidden', false);
+
+        const tone = activeRecord.summary?.tone || 'neutral';
+        patchText(verdictStatusTag, activeRecord.summary?.badge || '已完成');
+        patchClasses(verdictStatusTag, {
+          'state-synced': tone === 'ok' || tone === 'good' || tone === 'info',
+          'state-warn': tone === 'warn',
+          'state-danger': tone === 'bad',
+          'state-neutral': tone === 'neutral',
+        });
+
+        const targetSuffix = activeRecord.usedCurrentWindowDefault ? ' · 当前窗口' : '';
+        patchText(verdictTargetText, `${activeRecord.targetLabel || activeRecord.targetModelId || ''}${targetSuffix}`);
+        patchText(verdictHeadline, activeRecord.summary?.headline || '');
+        patchText(verdictDetail, activeRecord.summary?.detail || '');
+
+        const durSec = Number.isFinite(activeRecord.elapsedMs)
+          ? `${(activeRecord.elapsedMs / 1000).toFixed(1)}s`
+          : '';
+        const sampleMeta =
+          activeRecord.usedOutputs > 0
+            ? `${activeRecord.usedOutputs}/3 采样 · ${activeRecord.totalNumbers || 0} 整数`
+            : '';
+        const modeMeta = activeRecord.ok
+          ? activeRecord.fastTierRouted
+            ? '极速同权'
+            : activeRecord.probeMode === 'exact'
+              ? '原档直测'
+              : ''
+          : '';
+        patchText(
+          verdictMetaText,
+          [durSec, sampleMeta, modeMeta].filter(Boolean).join(' · ')
+        );
+
+        const topCands = Array.isArray(activeRecord.topCandidates)
+          ? activeRecord.topCandidates.slice(0, 3)
+          : [];
+        patchAttr(candidateListEl, 'hidden', topCands.length === 0);
+
+        if (topCands.length > 0) {
+          const maxRaw = Math.max(
+            ...topCands.map((c) => Number(c.rawScore ?? c.score ?? 0)),
+            1e-6
+          );
+          const minRaw = Math.min(
+            ...topCands.map((c) => Number(c.rawScore ?? c.score ?? 0)),
+            0
+          );
+          const spanRaw = Math.max(maxRaw - minRaw, 1e-6);
+
+          patchKeyedList(candidateListEl, topCands, {
+            keyFn: (cand) => cand.model || cand.label,
+            sigFn: (cand, idx) =>
+              `${idx}::${cand.label}::${cand.probability ?? ''}::${cand.score ?? ''}`,
+            createRow: () => {
+              const rankEl = h('span', { className: 'detector-cand-rank' });
+              const nameEl = h('span', { className: 'detector-cand-name' });
+              const fillEl = h('div', { className: 'detector-cand-fill' });
+              const trackEl = h('div', { className: 'detector-cand-track' }, [fillEl]);
+              const pctEl = h('span', { className: 'detector-cand-pct' });
+              const rowEl = h('div', { className: 'detector-cand-row' }, [
+                rankEl,
+                nameEl,
+                trackEl,
+                pctEl,
+              ]);
+              return { el: rowEl, refs: { rankEl, nameEl, fillEl, pctEl } };
+            },
+            updateRow: (refs, cand, idx, rowEl) => {
+              patchClasses(rowEl, { 'is-top': idx === 0 });
+              patchText(refs.rankEl, `#${idx + 1}`);
+              patchText(refs.nameEl, cand.label || cand.model || '');
+              patchAttr(refs.nameEl, 'title', cand.familyName ? `${cand.label} (${cand.familyName})` : cand.label || '');
+              if (Number.isFinite(cand.probability)) {
+                const pct = Math.max(0, Math.min(100, cand.probability * 100));
+                patchStyleVar(refs.fillEl, '--cand-w', `${Math.max(4, Math.round(pct))}%`);
+                patchText(refs.pctEl, `${pct >= 10 ? pct.toFixed(1) : pct.toFixed(1)}%`);
+              } else {
+                const rel = Math.round(
+                  25 + ((Number(cand.rawScore ?? cand.score ?? 0) - minRaw) / spanRaw) * 75
+                );
+                patchStyleVar(refs.fillEl, '--cand-w', `${Math.max(8, Math.min(100, rel))}%`);
+                patchText(refs.pctEl, Number(cand.score ?? 0).toFixed(2));
+              }
+            },
+          });
+        }
+
+        const showHistory = history.length > 1;
+        patchAttr(historySectionEl, 'hidden', !showHistory);
+        if (showHistory) {
+          const histSlice = history.slice(0, 4);
+          patchKeyedList(historyListEl, histSlice, {
+            keyFn: (item) => item.id,
+            sigFn: (item) =>
+              `${item.id}::${item.id === activeRecord.id}::${item.summary?.badge || ''}::${item.targetLabel || ''}`,
+            createRow: (item) => {
+              const badgeEl = h('span', { className: 'detector-history-badge' });
+              const modelEl = h('span', { className: 'detector-history-model' });
+              const timeEl = h('span', { className: 'detector-history-time' });
+              const btnEl = h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'detector-history-item',
+                  onClick: () => {
+                    inspectedHistoryId = item.id;
+                    renderDetectorSnapshot(detectorSnapshot);
+                  },
+                },
+                [
+                  h('span', { className: 'detector-history-item-left' }, [badgeEl, modelEl]),
+                  timeEl,
+                ]
+              );
+              return { el: btnEl, refs: { badgeEl, modelEl, timeEl } };
+            },
+            updateRow: (refs, item, _idx, btnEl) => {
+              const selected = item.id === activeRecord.id;
+              const hTone = item.summary?.tone || 'neutral';
+              patchClasses(btnEl, { 'is-selected': selected });
+              patchText(refs.badgeEl, item.summary?.badge || '完成');
+              patchClasses(refs.badgeEl, {
+                'tone-good': hTone === 'ok' || hTone === 'good',
+                'tone-info': hTone === 'info',
+                'tone-warn': hTone === 'warn',
+                'tone-bad': hTone === 'bad',
+              });
+              patchText(refs.modelEl, item.targetLabel || item.targetModelId || '');
+              patchText(refs.timeEl, formatDetectorHistoryClock(item.createdAt));
+            },
+          });
+        }
+      }
+
+      viewScrollbar.refresh();
+    }
+
+    function stopDetectorPollLoop() {
+      if (detectorPollTimer) {
+        clearTimeout(detectorPollTimer);
+        detectorPollTimer = null;
+      }
+    }
+
+    async function refreshDetectorStatus({ force = false } = {}) {
+      try {
+        const snap = await fetchModelDetectorStatus({
+          force,
+          knownModels: detectorSnapshot?.availableModels || [],
+        });
+        if (!snap) return;
+        const nowRunning = Boolean(snap.running?.active);
+        if (wasDetectorRunning && !nowRunning) {
+          inspectedHistoryId = '';
+          void fetchTelemetry({ force: true });
+        }
+        wasDetectorRunning = nowRunning;
+        detectorSnapshot = snap;
+        renderDetectorSnapshot(snap);
+        if (nowRunning) {
+          ensureDetectorPollLoop();
+        } else {
+          stopDetectorPollLoop();
+        }
+      } catch {
+        // 静默忽略单次轮询网络抖动
+      }
+    }
+
+    function ensureDetectorPollLoop() {
+      if (detectorPollTimer) return;
+      const tick = async () => {
+        detectorPollTimer = null;
+        if (!detectorSnapshot?.running?.active) return;
+        await refreshDetectorStatus({ force: false });
+        if (detectorSnapshot?.running?.active && !detectorPollTimer) {
+          detectorPollTimer = setTimeout(tick, 850);
+        }
+      };
+      detectorPollTimer = setTimeout(tick, 850);
+    }
+
     const settingsInner = h(
       'div',
       {
         style: 'display: flex; flex-direction: column; gap: var(--space-3); padding-bottom: 2px;',
       },
-      [generalPanel, topbarPanel, cloudPanel]
+      [settingsSubNavBar, generalGroup, detectorGroup]
     );
     const viewScrollbar = CustomScrollbar({
       contentEl: settingsInner,
@@ -6440,27 +7473,63 @@ const SettingsView = defineComponent({
       viewScrollbar.refresh();
     }
 
+    function applySubTabVisibility(subTab) {
+      const isDetector = subTab === 'detector';
+      settingsSubTabSwitch.setValue(isDetector ? 'detector' : 'general');
+      patchAttr(generalGroup, 'hidden', isDetector);
+      patchAttr(detectorGroup, 'hidden', !isDetector);
+      if (isDetector && uiStore.getState().activeView === 'settings') {
+        void refreshDetectorStatus({ force: false });
+      }
+      viewScrollbar.refresh();
+    }
+
+    applySubTabVisibility(uiStore.getState().settingsSubTab || 'general');
+
     const unsub = telemetryStore.subscribe(
       (st) => ({
         settings: st.telemetry?.settings,
         cloudStatus: st.telemetry?.cloudStatus,
+        activeCascadeId: st.telemetry?.activeConversation?.cascadeId || '',
+        activeModelShort: st.telemetry?.activeConversation?.activeModelShort || '',
+        selectedConversationId: st.selectedConversationId || '',
+        hostRouteConversationId: st.hostRouteConversationId || '',
       }),
-      (slice) => {
+      (slice, prevSlice) => {
         latestSettings = slice.settings;
         latestCloudStatus = slice.cloudStatus;
         renderSettings(slice.settings);
-        if (uiStore.getState().activeView === 'settings') {
+        const uiSt = uiStore.getState();
+        if (uiSt.activeView === 'settings') {
           renderCloudStatus(slice.cloudStatus);
+          const windowContextChanged =
+            !prevSlice ||
+            slice.activeCascadeId !== prevSlice.activeCascadeId ||
+            slice.activeModelShort !== prevSlice.activeModelShort ||
+            slice.selectedConversationId !== prevSlice.selectedConversationId ||
+            slice.hostRouteConversationId !== prevSlice.hostRouteConversationId;
+          if (uiSt.settingsSubTab === 'detector' && windowContextChanged && !detectorSnapshot?.running?.active) {
+            void refreshDetectorStatus({ force: false });
+          }
         }
       }
     );
 
     const unsubView = uiStore.subscribe(
-      (st) => st.activeView,
-      (activeView) => {
-        if (activeView === 'settings') {
+      (st) => ({
+        activeView: st.activeView,
+        settingsSubTab: st.settingsSubTab || 'general',
+      }),
+      (nav, prevNav) => {
+        if (!prevNav || nav.settingsSubTab !== prevNav.settingsSubTab) {
+          applySubTabVisibility(nav.settingsSubTab);
+        }
+        if (nav.activeView === 'settings') {
           if (latestSettings) renderSettings(latestSettings);
           if (latestCloudStatus) renderCloudStatus(latestCloudStatus);
+          if (nav.settingsSubTab === 'detector') {
+            void refreshDetectorStatus({ force: false });
+          }
           viewScrollbar.refresh();
         }
       }
@@ -6470,8 +7539,11 @@ const SettingsView = defineComponent({
       if (statusTimer) clearTimeout(statusTimer);
       if (topbarTimer) clearTimeout(topbarTimer);
       if (cloudTimer) clearTimeout(cloudTimer);
+      if (detectorFeedbackTimer) clearTimeout(detectorFeedbackTimer);
+      stopDetectorPollLoop();
       unsub();
       unsubView();
+      settingsSubTabSwitch.destroy();
       windowMountSelect.destroy();
       stepModelSelect.destroy();
       orchestratorIdSelect.destroy();
@@ -6480,12 +7552,15 @@ const SettingsView = defineComponent({
         sel.destroy();
       }
       autoUpdateSelect.destroy();
+      detectorModelSelect.destroy();
+      detectorProbeModeSwitch.destroy();
       viewScrollbar.destroy();
     });
 
     return {
       el: viewScrollbar.el,
       refs: {
+        settingsSubTabSwitch,
         windowMountSelect,
         stepModelSelect,
         orchestratorIdSelect,
@@ -6493,6 +7568,11 @@ const SettingsView = defineComponent({
         slotSelects,
         resetTopbarBtn,
         autoUpdateSelect,
+        detectorModelSelect,
+        detectorProbeModeSwitch,
+        syncDetectorBtn,
+        startDetectBtn,
+        cancelDetectBtn,
         viewScrollbar,
       },
     };
@@ -7400,6 +8480,11 @@ function mountWindowOverlay() {
     hidden: true,
     text: '主代理',
   });
+  const hoverCtxTierBadge = h('span', {
+    className: 'agent-badge',
+    hidden: true,
+    text: '256K',
+  });
   const hoverCtxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
   const hoverCtxSegmentBar = ContextSegmentMeter({ context: {} });
 
@@ -7426,6 +8511,7 @@ function mountWindowOverlay() {
       h('span', { className: 'panel-title' }, [
         createSvgIcon('layers', { size: 13 }),
         h('span', { text: '上下文窗口' }),
+        hoverCtxTierBadge,
         hoverCtxAgentBadge,
       ]),
       h('span', { className: 'panel-meta' }, [hoverCtxSummaryText]),
@@ -8227,7 +9313,12 @@ function mountWindowOverlay() {
     const activeConv = telemetry.activeConversation || {};
     const overviewActive = overviewScopedConv || activeConv;
     const ctx = ctxAgent?.context || overviewActive.context || activeConv.context || {};
-    const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000);
+    const ctxCtrl = telemetry.contextWindowControl || null;
+    const fallbackLimit =
+      ctxCtrl?.installed && ctxCtrl?.runningMatchesDisk && ctxCtrl?.targetTokens
+        ? ctxCtrl.targetTokens
+        : 256000;
+    const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || fallbackLimit);
     const totalTokens = Number(ctx.totalTokens || 0);
     const usedPct =
       limitTokens > 0 ? Math.min(100, +((totalTokens / limitTokens) * 100).toFixed(1)) : 0;
@@ -8601,6 +9692,23 @@ function mountWindowOverlay() {
       hoverCacheSub,
       `缓存 ${overviewActive.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(overviewActive.sessionCostUsd || 0)}`
     );
+
+    const showHoverTier = Boolean(ctxCtrl?.installed);
+    patchAttr(hoverCtxTierBadge, 'hidden', !showHoverTier);
+    if (showHoverTier) {
+      const tierLabel = formatContextTierLabel(ctxCtrl.mode);
+      const pendingRestart = Boolean(ctxCtrl.needsRestart);
+      patchText(hoverCtxTierBadge, pendingRestart ? `${tierLabel} · 待重启` : tierLabel);
+      patchAttr(
+        hoverCtxTierBadge,
+        'class',
+        pendingRestart
+          ? 'agent-badge badge-tier-warn'
+          : ctxCtrl.mode && ctxCtrl.mode !== '256k'
+            ? 'agent-badge badge-main'
+            : 'agent-badge'
+      );
+    }
 
     patchAttr(hoverCtxAgentBadge, 'hidden', !(hasSubagents && ctxAgent));
     if (hasSubagents && ctxAgent) {

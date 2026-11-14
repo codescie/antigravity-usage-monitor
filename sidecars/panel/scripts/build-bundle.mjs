@@ -442,7 +442,10 @@ export function buildBundle() {
 
   const cssBundle =
     cssOrder
-      .map((rel) => `/* --- ${rel} --- */\n${readFileSync(join(PANEL_DIR, rel), 'utf8').trim()}`)
+      .map(
+        (rel) =>
+          `/* --- ${rel} --- */\n${readFileSync(join(PANEL_DIR, rel), 'utf8').replace(/\r\n/g, '\n').trim()}`
+      )
       .join('\n\n') + '\n';
 
   writeFileSync(join(PANEL_DIR, 'styles.css'), cssBundle, 'utf8');
@@ -478,7 +481,7 @@ export function buildBundle() {
 
   const innerModules = jsOrder
     .map((rel) => {
-      const raw = readFileSync(join(PANEL_DIR, rel), 'utf8');
+      const raw = readFileSync(join(PANEL_DIR, rel), 'utf8').replace(/\r\n/g, '\n');
       const stripped = stripModuleSyntax(raw);
       return `// --- ${rel} ---\n${stripped.trim()}`;
     })
@@ -492,6 +495,7 @@ export function buildBundle() {
   const indexHtmlPath = join(PANEL_DIR, 'index.html');
   if (existsSync(indexHtmlPath)) {
     const html = readFileSync(indexHtmlPath, 'utf8')
+      .replace(/\r\n/g, '\n')
       .replace(/href="\/styles\.css(?:\?v=[^"]*)?"/, `href="/styles.css?v=${ver}"`)
       .replace(/src="\/app\.js(?:\?v=[^"]*)?"/, `src="/app.js?v=${ver}"`);
     writeFileSync(indexHtmlPath, html, 'utf8');

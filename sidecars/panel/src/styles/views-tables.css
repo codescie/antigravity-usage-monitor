@@ -25,6 +25,8 @@
   overflow-y: auto;
   overflow-x: hidden;
   background: var(--surface-panel);
+  container-type: inline-size;
+  container-name: steps-table;
 }
 
 /* --- 2. 粘性表头数据表 (Sticky-Header Data Table) --- */
@@ -106,6 +108,11 @@
 }
 
 /* --- 3. 极简对话轮次导轨与起点圆点 (Minimalist Turn Rail & Origin Dot) --- */
+.steps-data-table th,
+.steps-data-table td {
+  padding: 5px 3.5px;
+}
+
 .steps-data-table th.step-col-head,
 .steps-data-table td.step-cell {
   padding-left: 17px;
@@ -113,6 +120,52 @@
 
 .steps-data-table td.step-cell {
   position: relative;
+}
+
+.steps-data-table td.model-cell {
+  max-width: 118px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.steps-data-table.has-subagents td.model-cell {
+  max-width: 96px;
+}
+
+.steps-data-table .dur-main {
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.steps-data-table .dur-sub-ttft {
+  display: none;
+  font-size: 9.5px;
+  line-height: 1.2;
+}
+
+@container steps-table (max-width: 456px) {
+  .steps-data-table .col-ttft {
+    display: none;
+  }
+  .steps-data-table .dur-sub-ttft:not([hidden]) {
+    display: block;
+  }
+  .steps-data-table th,
+  .steps-data-table td {
+    padding: 5px 3px;
+  }
+  .steps-data-table td.model-cell {
+    max-width: 88px;
+  }
+  .steps-data-table.has-subagents td.model-cell {
+    max-width: 74px;
+  }
+}
+
+@container steps-table (max-width: 392px) {
+  .steps-data-table .col-cache {
+    display: none;
+  }
 }
 
 .turn-rail {

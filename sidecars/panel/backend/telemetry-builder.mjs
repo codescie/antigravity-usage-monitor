@@ -24,6 +24,7 @@ import {
   roundMetric,
   trajectoryCache,
 } from './config.mjs';
+import { getContextWindowControlSnapshot } from './context-window-manager.mjs';
 import { enumerateAndSyncConversations } from './local-scanner.mjs';
 import { callLsRpc, getOfficialQuotaSummary } from './ls-rpc.mjs';
 import {
@@ -221,7 +222,9 @@ function extractActiveContextTelemetry(
   enrichedActiveSteps,
   latestEnriched,
   sessionInputTokens,
-  sessionCacheReadTokens
+  sessionCacheReadTokens,
+  defaultBudgetTokens = 256000,
+  liveRunningBudgetTokens = 0
 ) {
   let latestBreakdown = latestEnriched?.contextBreakdown || null;
   if (!latestBreakdown && !latestEnriched?.isCompactionStep) {
@@ -260,7 +263,17 @@ function extractActiveContextTelemetry(
   const ctxResponse = latestEnriched?.responseTokens || 0;
   const ctxTotal =
     ctxBreakdownTotal > 0 ? ctxBreakdownTotal : ctxCached + ctxFreshInput + ctxThinking + ctxResponse;
-  const compactionLimitTokens = Number(latestEnriched?.maxContextBudgetTokens || 256000);
+  const rawStepBudget = Number(latestEnriched?.maxContextBudgetTokens || 0);
+  const isStandardClampTierBudget =
+    rawStepBudget === 256000 ||
+    rawStepBudget === 524288 ||
+    rawStepBudget === 786432 ||
+    rawStepBudget === 983040 ||
+    rawStepBudget === 1000000;
+  const compactionLimitTokens =
+    liveRunningBudgetTokens > 0 && (rawStepBudget === 0 || isStandardClampTierBudget)
+      ? liveRunningBudgetTokens
+      : Number(rawStepBudget || defaultBudgetTokens || 256000);
   const compactionUsedTokens = Number(
     latestEnriched?.estimatedContextTokens || ctxBreakdownTotal || ctxCached + ctxFreshInput
   );
@@ -328,6 +341,8 @@ function buildAgentUnitTelemetry({
   dynamicModelMap,
   knownUpstreamByModelKey,
   includeRecentSteps = true,
+  defaultBudgetTokens = 256000,
+  liveRunningBudgetTokens = 0,
 }) {
   const enrichedRes = enrichActiveConversationSteps(
     rawSteps,
@@ -348,7 +363,9 @@ function buildAgentUnitTelemetry({
     taggedSteps,
     enrichedRes.latestEnriched,
     enrichedRes.sessionInputTokens,
-    enrichedRes.sessionCacheReadTokens
+    enrichedRes.sessionCacheReadTokens,
+    defaultBudgetTokens,
+    liveRunningBudgetTokens
   );
   const modelBreakdown = buildScopedModelBreakdown(taggedSteps, dynamicModelMap);
   const lastModifiedMs =
@@ -415,11 +432,29 @@ export async function buildTelemetryPayloadInternal(
   filterOpts = {}
 ) {
   const settings = loadSettings();
-  const [userStatusRes, allTrajRes, initialOfficialQuotaInfo] = await Promise.all([
-    callLsRpc('GetUserStatus', {}).catch(() => ({})),
-    callLsRpc('GetAllCascadeTrajectories', {}).catch(() => ({})),
-    getOfficialQuotaSummary(forceQuotaRefresh),
-  ]);
+  const [userStatusRes, allTrajRes, initialOfficialQuotaInfo, contextWindowControl] =
+    await Promise.all([
+      callLsRpc('GetUserStatus', {}).catch(() => ({})),
+      callLsRpc('GetAllCascadeTrajectories', {}).catch(() => ({})),
+      getOfficialQuotaSummary(forceQuotaRefresh),
+      getContextWindowControlSnapshot().catch(() => null),
+    ]);
+
+  const liveRunningBudgetTokens =
+    contextWindowControl?.installed &&
+    contextWindowControl?.supported &&
+    contextWindowControl?.runningMatchesDisk
+      ? contextWindowControl.diskMode === '512k'
+        ? 524288
+        : contextWindowControl.diskMode === '768k'
+          ? 786432
+          : contextWindowControl.diskMode === '1m'
+            ? 983040
+            : contextWindowControl.diskMode === '256k'
+              ? 256000
+              : 0
+      : 0;
+  const defaultBudgetTokens = liveRunningBudgetTokens > 0 ? liveRunningBudgetTokens : 256000;
 
   const userStatus = userStatusRes?.userStatus || {};
   const currentAccountName = userStatus?.email || userStatus?.name || '';
@@ -486,6 +521,8 @@ export async function buildTelemetryPayloadInternal(
     dynamicModelMap,
     knownUpstreamByModelKey,
     includeRecentSteps: false,
+    defaultBudgetTokens,
+    liveRunningBudgetTokens,
   });
 
   const enrichedActiveSteps = mainUnit.taggedSteps;
@@ -546,6 +583,8 @@ export async function buildTelemetryPayloadInternal(
       dynamicModelMap,
       knownUpstreamByModelKey,
       includeRecentSteps: true,
+      defaultBudgetTokens,
+      liveRunningBudgetTokens,
     });
 
     allCombinedEnrichedSteps.push(...subUnit.taggedSteps);
@@ -992,9 +1031,12 @@ export async function buildTelemetryPayloadInternal(
     return stats;
   };
 
-  // 7. 构建所有正在运行的主进程（根会话）及其子代理缩略状态列表
+  // 7. 构建所有正在运行的主进程（根会话）及其子代理缩略状态列表（严格排除后台短暂的模型检测探针，避免顶栏或会话选择器跳变）
+  const userVisibleConversations = conversations.filter(
+    (c) => !String(c.title || '').trim().startsWith('[模型检测探针]')
+  );
   const runningConversations = [];
-  for (const rootConv of conversations) {
+  for (const rootConv of userVisibleConversations) {
     const isMainRunning = rootConv.status === 'CASCADE_RUN_STATUS_RUNNING';
     const rawSubs = Array.isArray(rootConv.subagents) ? rootConv.subagents : [];
     const hasRunningSub = rawSubs.some((s) => s.status === 'CASCADE_RUN_STATUS_RUNNING');
@@ -1126,16 +1168,17 @@ export async function buildTelemetryPayloadInternal(
     timestamp: new Date().toISOString(),
     uiBundleVersion,
     settings,
+    contextWindowControl: contextWindowControl || null,
     cloudStatus: getCloudStatus(),
     account: {
       name: userStatus?.name || '',
       tierName: rawTierName || 'Google AI',
       planName: resolvedPlanName,
       aiCredits: realAiCredits > 0 ? realAiCredits : null,
-      totalConversations: conversations.length,
+      totalConversations: userVisibleConversations.length,
     },
     runningConversations,
-    conversations: conversations.slice(0, MAX_RECENT_CONVERSATIONS).map((c) => {
+    conversations: userVisibleConversations.slice(0, MAX_RECENT_CONVERSATIONS).map((c) => {
       const qStats = getConversationQuickStats(c);
       const rawSubs = Array.isArray(c.subagents) ? c.subagents : [];
       const runningSubCount = rawSubs.filter((s) => s.status === 'CASCADE_RUN_STATUS_RUNNING').length;

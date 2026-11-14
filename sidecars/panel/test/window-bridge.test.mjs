@@ -1024,8 +1024,8 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     const settingsSelects = settingsPane.querySelectorAll('.custom-select');
     assert.equal(
       settingsSelects.length,
-      7,
-      'SettingsView renders 7 CustomSelect controls (mount, modelFormat, orchestratorIdFormat, 3 topbar slots, autoUpdate)'
+      8,
+      'SettingsView renders 8 CustomSelect controls (mount, modelFormat, orchestratorIdFormat, 3 topbar slots, autoUpdate, detectorModel)'
     );
     const mountSelectEl = settingsSelects[0];
     const modelFormatSelectEl = settingsSelects[1];
@@ -1076,8 +1076,24 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     assert.equal(mockSettings.orchestratorIdMode, 'compact');
     assert.ok(orchestratorIdSelectEl.querySelector('.select-label').textContent.includes('精简代号'));
 
+    // Verify Settings sub-navigation (常规偏好 | 模型检测) switches tab groups cleanly
+    const subNavBtns = settingsPane.querySelectorAll('.settings-subnav .seg-btn');
+    const tabGroups = settingsPane.querySelectorAll('.settings-tab-group');
+    assert.equal(subNavBtns.length, 2, 'Settings subnav has 常规偏好 / 模型检测 buttons');
+    assert.equal(tabGroups.length, 2, 'SettingsView has general and detector groups');
+    assert.equal(tabGroups[0].hasAttribute('hidden'), false);
+    assert.equal(tabGroups[1].hasAttribute('hidden'), true);
+    subNavBtns[1].dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(tabGroups[0].hasAttribute('hidden'), true, 'General group hidden on detector sub-tab');
+    assert.equal(tabGroups[1].hasAttribute('hidden'), false, 'Detector group visible on detector sub-tab');
+    subNavBtns[0].dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(tabGroups[0].hasAttribute('hidden'), false);
+    assert.equal(tabGroups[1].hasAttribute('hidden'), true);
+
     // Toggle topbar multi-session switch: show -> hide -> show
-    const topbarSegBtns = settingsPane.querySelectorAll('.seg-btn');
+    const topbarSegBtns = settingsPane.querySelectorAll('.topbar-config-panel .seg-btn');
     assert.equal(topbarSegBtns.length, 2, 'Topbar multi-session toggle has 显示 / 隐藏 buttons');
     topbarSegBtns[1].dispatchEvent({ type: 'click', stopPropagation() {} });
     await new Promise((r) => setTimeout(r, 30));
@@ -1212,7 +1228,7 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     assert.equal(mockSettings.autoUpdatePlugin, false);
     assert.equal(topbarUpdateBtn.hasAttribute('hidden'), false, 'Topbar update pill visible when mode=manual');
 
-    // Verify ConsumptionView omits "+ 待定" / "3993 步费用待定" and StepsDetailView protects header title
+    // Verify ConsumptionView omits "+ 待定" / "3993 步费用待定" and StepsDetailView protects header title + 8-column per-step duration
     pillTabs[1].dispatchEvent({ type: 'click', stopPropagation() {} });
     await new Promise((r) => setTimeout(r, 15));
     const heroCostEl = popoverEl.querySelector('.cons-hero-cost');
@@ -1225,6 +1241,17 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     );
     assert.ok(popoverEl.querySelector('.steps-panel-header'), 'Steps header flex wrapper present');
     assert.ok(popoverEl.querySelector('.steps-panel-title'), 'Steps title non-shrinking class present');
+
+    pillTabs[2].dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 15));
+    const stepsTable = popoverEl.querySelector('.steps-data-table');
+    assert.ok(stepsTable, 'StepsDetailView data table mounted');
+    const stepsHeaders = stepsTable.children[0].children[0].children.map((th) => th.textContent);
+    assert.deepEqual(
+      stepsHeaders,
+      ['步序', '模型', '速度', '首字', '耗时', '上下文 / 输出', '缓存', '费用'],
+      'StepsDetailView renders all 8 headers including 耗时'
+    );
 
     // Verify bundle version bump NEVER calls window.location.reload() in overlay mode
     currentBundleVer = 'ver-200';
@@ -1267,7 +1294,24 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
             stepCount: 8,
             latestTokPerSec: 120.5,
             context: { totalTokens: 64000, compactionLimitTokens: 256000, limitTokens: 256000 },
-            recentSteps: [],
+            recentSteps: [
+              {
+                stepIndex: 5,
+                modelKey: 'MODEL_PLACEHOLDER_M429',
+                modelShort: 'gemini-4-carbon',
+                modelUpstream: 'gemini-4-carbon-high',
+                tokPerSec: 120.5,
+                ttftSec: 2.34,
+                totalDurationSec: 65.4,
+                thinkingDurationSec: 40.1,
+                nativeStreamSec: 22.96,
+                isComplete: true,
+                contextTokens: 64000,
+                outputTokens: 512,
+                cacheHitPct: 80,
+                costUsd: 0.012,
+              },
+            ],
           },
           consumption: { selectedRange: { key: 'today', label: '今天', startMs: 1, endMs: 2 }, session: {}, account: {}, trendSeries: [], monthlySeries: [] },
           quotas: null,
@@ -1277,6 +1321,12 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     ]);
     assert.equal(delivered, 1);
     await new Promise((r) => setTimeout(r, 20));
+    const stepsBody = stepsTable.children[1];
+    const stepDurCell = stepsBody.querySelector('.col-dur');
+    assert.ok(stepDurCell, 'Duration cell rendered in StepsDetailView');
+    assert.equal(stepDurCell.querySelector('.dur-main').textContent, '1m05s');
+    assert.equal(stepDurCell.querySelector('.dur-sub-ttft').textContent, '首 2.3s');
+    assert.ok(stepDurCell.getAttribute('title').includes('总耗时 65.40s'));
     assert.equal(ctxPctEl.textContent, '25%', 'CDP relay delivered live telemetry without HTTP');
     assert.equal(speedSegEl.children[0].textContent, '121 t/s');
     assert.equal(quotaSegEl.hasAttribute('hidden'), false, 'Quota slot stays pre-reserved even when quotas=null');

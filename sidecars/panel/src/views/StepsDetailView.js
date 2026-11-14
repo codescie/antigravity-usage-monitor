@@ -16,6 +16,8 @@ import {
 } from '../core/domPatch.js';
 import {
   formatMetric,
+  formatStepDuration,
+  formatStepDurationDetail,
   formatTokens,
   formatUsd,
   normalizeOrchestratorIdDisplayMode,
@@ -69,24 +71,24 @@ export const StepsDetailView = defineComponent({
       },
     });
 
-    // --- 子表 1：单步明细表（列定义：步序、模型、吞吐速度、首字延迟、上下文/输出、缓存命中率、单步费用） ---
+    // --- 子表 1：单步明细表（列定义：步序、模型、吞吐速度、首字延迟、单步耗时、上下文/输出、缓存命中率、单步费用） ---
     const stepsTbody = h('tbody');
-    const stepsTablePane = h('div', { className: 'table-viewport' }, [
-      h('table', { className: 'data-table steps-data-table' }, [
-        h('thead', {}, [
-          h('tr', {}, [
-            h('th', { className: 'step-col-head', text: '步序' }),
-            h('th', { text: '模型' }),
-            h('th', { text: '速度' }),
-            h('th', { text: '首字' }),
-            h('th', { text: '上下文 / 输出' }),
-            h('th', { text: '缓存' }),
-            h('th', { text: '费用' }),
-          ]),
+    const stepsTableEl = h('table', { className: 'data-table steps-data-table' }, [
+      h('thead', {}, [
+        h('tr', {}, [
+          h('th', { className: 'step-col-head', text: '步序' }),
+          h('th', { className: 'col-model', text: '模型' }),
+          h('th', { className: 'col-speed', text: '速度' }),
+          h('th', { className: 'col-ttft', text: '首字' }),
+          h('th', { className: 'col-dur', text: '耗时' }),
+          h('th', { className: 'col-ctx', text: '上下文 / 输出' }),
+          h('th', { className: 'col-cache', text: '缓存' }),
+          h('th', { className: 'col-cost', text: '费用' }),
         ]),
-        stepsTbody,
       ]),
+      stepsTbody,
     ]);
+    const stepsTablePane = h('div', { className: 'table-viewport' }, [stepsTableEl]);
     const stepsScroll = CustomScrollbar({
       contentEl: stepsTablePane,
       className: 'table-scroll-host',
@@ -295,13 +297,15 @@ export const StepsDetailView = defineComponent({
         };
       });
 
+      patchClasses(stepsTableEl, { 'has-subagents': hasSubagents });
+
       // 1. 单步测速表增量对账：以 `<agentCascadeId>-<stepIndex>` 为稳定行键，仅在签名变化时刷新单元格
       patchKeyedList(stepsTbody, decoratedSteps, {
         keyFn: (item) => item.rowKey,
         sigFn: (item) => {
           const { st } = item;
           const disp = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
-          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}:${item.hasTurn}:${item.hasUp}:${item.hasDown}:${item.isStart}:${item.isLatest}:${item.prompt}`;
+          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.totalDurationSec}:${st.thinkingDurationSec}:${st.nativeStreamSec}:${st.isComplete}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}:${item.hasTurn}:${item.hasUp}:${item.hasDown}:${item.isStart}:${item.isLatest}:${item.prompt}`;
         },
         createRow: () => {
           const railLineEl = h('span', { className: 'turn-rail-line', hidden: true });
@@ -323,25 +327,26 @@ export const StepsDetailView = defineComponent({
             stepNumText,
           ]);
 
-          const tdModel = h('td', {
-            style: 'max-width: 140px; overflow: hidden; text-overflow: ellipsis;',
-          });
+          const tdModel = h('td', { className: 'col-model model-cell' });
           const speedMain = h('strong', {
             className: 'cell-value accent-speed',
             style: 'font-size: 11px;',
           });
           const speedReason = h('div', { className: 'text-muted', style: 'font-size: 9.5px;' });
-          const tdSpeed = h('td', {}, [speedMain, speedReason]);
+          const tdSpeed = h('td', { className: 'col-speed' }, [speedMain, speedReason]);
 
-          const tdTtft = h('td');
-          const tdCtx = h('td');
+          const tdTtft = h('td', { className: 'col-ttft text-muted' });
+          const durMain = h('span', { className: 'dur-main cell-value' });
+          const durSubTtft = h('div', { className: 'dur-sub-ttft text-muted', hidden: true });
+          const tdDur = h('td', { className: 'col-dur' }, [durMain, durSubTtft]);
+          const tdCtx = h('td', { className: 'col-ctx' });
           const tdCache = h('td', {
-            className: 'cell-value accent-ok',
+            className: 'col-cache cell-value accent-ok',
             style: 'font-size: 11px;',
           });
-          const tdCost = h('td', { style: 'font-weight: 600;' });
+          const tdCost = h('td', { className: 'col-cost', style: 'font-weight: 600;' });
 
-          const tr = h('tr', {}, [tdStep, tdModel, tdSpeed, tdTtft, tdCtx, tdCache, tdCost]);
+          const tr = h('tr', {}, [tdStep, tdModel, tdSpeed, tdTtft, tdDur, tdCtx, tdCache, tdCost]);
           return {
             el: tr,
             refs: {
@@ -355,6 +360,9 @@ export const StepsDetailView = defineComponent({
               speedMain,
               speedReason,
               tdTtft,
+              tdDur,
+              durMain,
+              durSubTtft,
               tdCtx,
               tdCache,
               tdCost,
@@ -421,9 +429,17 @@ export const StepsDetailView = defineComponent({
           patchAttr(refs.speedReason, 'hidden', !reason);
 
           patchText(refs.tdTtft, formatMetric(st.ttftSec, 's'));
-          patchText(
+          patchText(refs.durMain, formatStepDuration(st.totalDurationSec));
+          const subTtft = Number.isFinite(st.ttftSec) ? `首 ${st.ttftSec.toFixed(1)}s` : '';
+          patchText(refs.durSubTtft, subTtft);
+          patchAttr(refs.durSubTtft, 'hidden', !subTtft);
+          patchAttr(refs.tdDur, 'title', formatStepDurationDetail(st));
+          const ctxStr = `${formatTokens(st.contextTokens)} / +${Number(st.outputTokens || 0)}`;
+          patchText(refs.tdCtx, ctxStr);
+          patchAttr(
             refs.tdCtx,
-            `${formatTokens(st.contextTokens)} / +${Number(st.outputTokens || 0)}`
+            'title',
+            `上下文 ${formatTokens(st.contextTokens)} · 输出 +${Number(st.outputTokens || 0)} · 缓存 ${Number(st.cacheHitPct ?? 0)}%`
           );
           patchText(refs.tdCache, `${Number(st.cacheHitPct ?? 0)}%`);
 

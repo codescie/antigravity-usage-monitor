@@ -1178,17 +1178,33 @@ export async function enumerateAndSyncConversations({
       (a.groupLastModifiedMs || a.lastModifiedMs || 0)
   );
 
-  // 选定当前活跃根会话：若指定了有效 requestedConvId（支持根会话 ID 或子代理 ID）则优先使用，否则取最近修改的根会话
+  // 选定当前活跃根会话：若指定了有效非探针 requestedConvId（支持根会话 ID 或子代理 ID）则优先使用，否则取最近修改的非探针根会话
+  const isProbeConv = (c) => String(c?.title || '').trim().startsWith('[模型检测探针]');
+  const reqIsKnownProbe = Boolean(
+    reqLower &&
+      conversations.some(
+        (c) =>
+          isProbeConv(c) &&
+          (c.cascadeId.toLowerCase() === reqLower ||
+            (c.subagents || []).some((s) => s.cascadeId.toLowerCase() === reqLower))
+      )
+  );
+  const matchedReqConv =
+    reqLower &&
+    !reqIsKnownProbe &&
+    (conversations.find((c) => c.cascadeId.toLowerCase() === reqLower) ||
+      conversations.find((c) =>
+        (c.subagents || []).some((s) => s.cascadeId.toLowerCase() === reqLower)
+      ));
   const activeConvSummary =
-    (reqLower &&
-      (conversations.find((c) => c.cascadeId.toLowerCase() === reqLower) ||
-        conversations.find((c) =>
-          (c.subagents || []).some((s) => s.cascadeId.toLowerCase() === reqLower)
-        ))) ||
+    matchedReqConv ||
+    conversations.find((c) => !isProbeConv(c)) ||
     conversations[0] ||
     null;
   const safeReqId =
-    requestedConvId && !/[\\/]|\.\./.test(String(requestedConvId)) ? requestedConvId : null;
+    !reqIsKnownProbe && requestedConvId && !/[\\/]|\.\./.test(String(requestedConvId))
+      ? requestedConvId
+      : null;
   const activeCascadeId = activeConvSummary?.cascadeId || safeReqId || null;
 
   return {
