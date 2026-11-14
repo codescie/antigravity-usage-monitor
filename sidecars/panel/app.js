@@ -1164,6 +1164,7 @@ function isEquivalentTelemetry(prev, next) {
   const pCtxCtrl = prev.contextWindowControl;
   const nCtxCtrl = next.contextWindowControl;
   if (
+    pCtxCtrl?.platform !== nCtxCtrl?.platform ||
     pCtxCtrl?.supported !== nCtxCtrl?.supported ||
     pCtxCtrl?.installed !== nCtxCtrl?.installed ||
     pCtxCtrl?.mode !== nCtxCtrl?.mode ||
@@ -1856,6 +1857,18 @@ async function syncModelDetector({ knownModels = [] } = {}) {
   });
   void fetchTelemetry({ force: true });
   return res;
+}
+
+function isMacHostPlatform(telemetry) {
+  const p = String(telemetry?.contextWindowControl?.platform || telemetry?.hostPlatform || '')
+    .trim()
+    .toLowerCase();
+  if (p) return p === 'darwin';
+  if (typeof navigator !== 'undefined') {
+    const ua = String(navigator.platform || navigator.userAgent || '');
+    return /mac|darwin|iphone|ipad/i.test(ua);
+  }
+  return false;
 }
 
 function formatContextTierLabel(mode) {
@@ -4875,8 +4888,13 @@ const LiveOverviewView = defineComponent({
           statusText = '当前客户端版本特征暂未匹配';
           statusTitle = statusText;
         } else if (ctxCtrl.needsRestart) {
-          statusText = `已切 ${activeLabel} · 重启窗口生效`;
-          statusTitle = `磁盘二进制与全局策略已切换为 ${activeLabel}；当前运行中的 language_server 需重开反重力窗口后按新水位压缩`;
+          if (isMacHostPlatform(data)) {
+            statusText = `已切 ${activeLabel} · 完全退出重开生效`;
+            statusTitle = `磁盘应用包与全局策略已切换为 ${activeLabel}；macOS 下请按 Cmd+Q 完全退出并重新打开 Antigravity 生效`;
+          } else {
+            statusText = `已切 ${activeLabel} · 重启窗口生效`;
+            statusTitle = `磁盘二进制与全局策略已切换为 ${activeLabel}；当前运行中的 language_server 需重开反重力窗口后按新水位压缩`;
+          }
         }
 
         patchText(ctxTierStatusEl, statusText);
@@ -6366,10 +6384,10 @@ const SettingsView = defineComponent({
     let detectorFeedbackTimer = null;
     let detectorPollTimer = null;
 
-    const saveStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
-    const topbarStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
-    const cloudStatusMsg = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
-    const detectorStatusMsg = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
+    const saveStatusText = h('span', { className: 'text-muted panel-feedback', text: '' });
+    const topbarStatusText = h('span', { className: 'text-muted panel-feedback', text: '' });
+    const cloudStatusMsg = h('span', { className: 'text-muted panel-feedback', text: '' });
+    const detectorStatusMsg = h('span', { className: 'text-muted panel-feedback', text: '' });
 
     /** 在常规设置面板右上角展示短暂的保存状态提示 */
     function showSaveFeedback(text) {
@@ -7050,7 +7068,7 @@ const SettingsView = defineComponent({
     ]);
 
     // --- 检测结论与候选排名面板 ---
-    const verdictMetaText = h('span', { className: 'panel-meta', text: '' });
+    const verdictMetaText = h('span', { className: 'panel-meta detector-verdict-meta', text: '' });
     const detectorEmptyNote = h('div', {
       className: 'detector-empty-note',
       text: '默认检测当前窗口模型。通过 3 路多语种无语义整数分布数学比对模型底层权重，不污染当前对话上下文。',
@@ -7714,7 +7732,8 @@ const App = defineComponent({
 
 const CAPSULE_HOST_ID = 'ag-usage-monitor-capsule';
 const PORTAL_HOST_ID = 'ag-usage-monitor-portal';
-const FLOATING_CARD_WIDTH = 492;
+const POPOVER_CARD_WIDTH = 520;
+const HOVER_CARD_WIDTH = 492;
 const MULTI_PANEL_WIDTH = 484;
 const RING_RADIUS = 5.2;
 const RING_CIRCUMFERENCE = +(2 * Math.PI * RING_RADIUS).toFixed(2);
@@ -8741,6 +8760,8 @@ function mountWindowOverlay() {
   (document.body || document.documentElement).appendChild(portalHost);
 
   // --- 3. 几何测量、顶栏停靠与防溢出定位 ---
+  const isMac = () => isMacHostPlatform(telemetryStore.getState().telemetry);
+
   function updateFixedFallbackPosition() {
     if (capsuleHost.getAttribute('data-dock') === 'flow') {
       capsuleHost.style.top = '';
@@ -8749,12 +8770,13 @@ function mountWindowOverlay() {
     }
     try {
       const vw = Number(window.innerWidth || 1280);
-      let rightOffset = 144;
+      const minRight = isMac() ? 12 : 144;
+      let rightOffset = minRight;
       const anchor = findNativeTopRightAnchor();
       if (anchor?.getBoundingClientRect) {
         const r = anchor.getBoundingClientRect();
         if (r.width > 0 && r.left > 0 && r.left < vw) {
-          rightOffset = Math.max(144, Math.ceil(vw - r.left + 6));
+          rightOffset = Math.max(minRight, Math.ceil(vw - r.left + 6));
         }
       }
       capsuleHost.style.top = '7px';
@@ -8771,10 +8793,11 @@ function mountWindowOverlay() {
         if (tbRect.width > 0) {
           const titleEl = titlebar.firstElementChild;
           const titleInner = titleEl?.firstElementChild;
+          const macTrafficReserve = isMac() ? 80 : 168;
           const contentStart = titleInner?.getBoundingClientRect
             ? Math.max(8, titleInner.getBoundingClientRect().left - tbRect.left)
-            : tbRect.left < 168
-              ? 168 - tbRect.left
+            : tbRect.left < macTrafficReserve
+              ? macTrafficReserve - tbRect.left
               : 12;
           const minTitleWidth = 180;
           let siblingButtonsWidth = 64;
@@ -8828,7 +8851,8 @@ function mountWindowOverlay() {
       const vh = Number(window.innerHeight || 800);
       const navRight = getLeftSidebarRightEdge(vw);
       const minLeft = navRight > 0 ? Math.max(12, navRight + 12) : 12;
-      const defaultCardW = Math.min(FLOATING_CARD_WIDTH, Math.max(280, vw - 24));
+      const defaultPopoverW = Math.min(POPOVER_CARD_WIDTH, Math.max(280, vw - 24));
+      const defaultHoverW = Math.min(HOVER_CARD_WIDTH, Math.max(280, vw - 24));
       const defaultMultiW = Math.min(MULTI_PANEL_WIDTH, Math.max(280, vw - 24));
 
       if (multiOpen) {
@@ -8864,7 +8888,7 @@ function mountWindowOverlay() {
         const rawW =
           Number(popoverEl.offsetWidth) ||
           Number(popoverEl.getBoundingClientRect?.().width) ||
-          defaultCardW;
+          defaultPopoverW;
         const panelW = Math.min(rawW, Math.max(280, vw - minLeft - 12));
         const top = Math.max(38, Math.min(vh - 140, Math.round(bRect.bottom + 6)));
         let left = Math.round(rightAnchorEdge - panelW);
@@ -8879,7 +8903,7 @@ function mountWindowOverlay() {
         const rawW =
           Number(hoverTipEl.offsetWidth) ||
           Number(hoverTipEl.getBoundingClientRect?.().width) ||
-          defaultCardW;
+          defaultHoverW;
         const tipW = Math.min(rawW, Math.max(280, vw - minLeft - 12));
         const tipH =
           Number(hoverTipEl.offsetHeight) ||
@@ -8933,6 +8957,7 @@ function mountWindowOverlay() {
     if (bodyOrDoc && !portalHost.isConnected) {
       bodyOrDoc.appendChild(portalHost);
     }
+    patchAttr(capsuleHost, 'data-os', isMac() ? 'mac' : 'default');
 
     const titlebar = findHostTitlebar();
     if (titlebar) {
@@ -9281,6 +9306,7 @@ function mountWindowOverlay() {
     const telemetry = telSt.telemetry;
 
     const showMulti = telemetry?.settings?.showTopbarMultiSession !== false;
+    patchAttr(capsuleHost, 'data-os', isMacHostPlatform(telemetry) ? 'mac' : 'default');
     patchAttr(multiBtn, 'hidden', !showMulti);
     patchAttr(capsuleHost, 'data-multi', showMulti ? 'on' : 'off');
     if (!showMulti && multiOpen) {
@@ -9698,7 +9724,8 @@ function mountWindowOverlay() {
     if (showHoverTier) {
       const tierLabel = formatContextTierLabel(ctxCtrl.mode);
       const pendingRestart = Boolean(ctxCtrl.needsRestart);
-      patchText(hoverCtxTierBadge, pendingRestart ? `${tierLabel} · 待重启` : tierLabel);
+      const macRestartSuffix = isMacHostPlatform(telemetry) ? '待退出重开' : '待重启';
+      patchText(hoverCtxTierBadge, pendingRestart ? `${tierLabel} · ${macRestartSuffix}` : tierLabel);
       patchAttr(
         hoverCtxTierBadge,
         'class',

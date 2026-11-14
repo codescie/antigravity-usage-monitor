@@ -519,8 +519,28 @@ export function decodeX64ClampAt(buf, offset) {
   };
 }
 
+function parseFatMachOSlices(raw) {
+  if (!Buffer.isBuffer(raw) || raw.length < 28 || raw.readUInt32BE(0) !== 0xcafebabe) {
+    return null;
+  }
+  const nfat = raw.readUInt32BE(4);
+  if (nfat < 1 || nfat > 8 || 8 + nfat * 20 > raw.length) return null;
+  const slices = [];
+  for (let i = 0; i < nfat; i += 1) {
+    const base = 8 + i * 20;
+    const cputype = raw.readUInt32BE(base);
+    const offset = raw.readUInt32BE(base + 8);
+    const size = raw.readUInt32BE(base + 12);
+    if (offset >= 8 + nfat * 20 && size >= 64 && offset + size <= raw.length) {
+      slices.push({ cputype, offset, size });
+    }
+  }
+  return slices.length > 0 ? slices : null;
+}
+
 function locateGoClampInMachO(raw) {
   if (raw.length < 64 || raw.readUInt32LE(0) !== 0xfeedfacf) return null;
+  const cputype = raw.readUInt32LE(4);
   const ncmds = raw.readUInt32LE(16);
   let cmdOff = 32;
   let textVmaddr = null;
@@ -580,26 +600,26 @@ function locateGoClampInMachO(raw) {
     pclntabOff + 72 > raw.length ||
     pclntabOff + pclntabSize > raw.length
   ) {
-    return { textSectionRange };
+    return { cputype, textSectionRange };
   }
 
   const pmagic = raw.readUInt32LE(pclntabOff);
   const ptrSize = raw[pclntabOff + 7];
   if ((pmagic !== 0xfffffff0 && pmagic !== 0xfffffff1) || ptrSize !== 8) {
-    return { textSectionRange };
+    return { cputype, textSectionRange };
   }
 
   const nfunctab = Number(raw.readBigUInt64LE(pclntabOff + 8));
   const textStart = raw.readBigUInt64LE(pclntabOff + 24);
   const funcnameOff = Number(raw.readBigUInt64LE(pclntabOff + 32));
   const functabOff = Number(raw.readBigUInt64LE(pclntabOff + 64));
-  if (nfunctab <= 0 || nfunctab > 1_000_000) return { textSectionRange };
+  if (nfunctab <= 0 || nfunctab > 1_000_000) return { cputype, textSectionRange };
 
   const fnBase = pclntabOff + funcnameOff;
   const ftBase = pclntabOff + functabOff;
   const pclnEnd = pclntabOff + pclntabSize;
   if (fnBase < pclntabOff || ftBase < pclntabOff || ftBase + nfunctab * 8 + 4 > pclnEnd) {
-    return { textSectionRange };
+    return { cputype, textSectionRange };
   }
 
   const candidateNameOffs = new Set();
@@ -613,7 +633,7 @@ function locateGoClampInMachO(raw) {
     candidateNameOffs.add(strStart - fnBase);
     searchPos = hit + GO_CLAMP_FUNC_SUFFIX.length;
   }
-  if (candidateNameOffs.size === 0) return { textSectionRange };
+  if (candidateNameOffs.size === 0) return { cputype, textSectionRange };
 
   const baseVa = textStart !== 0n ? textStart : sectTextAddr;
   for (let i = 0; i < nfunctab; i += 1) {
@@ -632,10 +652,10 @@ function locateGoClampInMachO(raw) {
     const fStart = Number(vaStart - textVmaddr + textFileoff);
     const fEnd = Number(vaEnd - textVmaddr + textFileoff);
     if (fStart >= 0 && fEnd > fStart && fEnd <= raw.length && fEnd - fStart <= 8192) {
-      return { funcRange: { start: fStart, end: fEnd }, textSectionRange };
+      return { cputype, funcRange: { start: fStart, end: fEnd }, textSectionRange };
     }
   }
-  return { textSectionRange };
+  return { cputype, textSectionRange };
 }
 
 function locateGoClampInPE(raw) {
@@ -807,17 +827,57 @@ function scanX64ClampInRange(raw, start, end) {
 }
 
 function inspectRawClampBuffer(raw) {
+  const fatSlices = parseFatMachOSlices(raw);
+  if (fatSlices) {
+    const validHits = [];
+    for (const slice of fatSlices) {
+      if (slice.cputype !== 0x0100000c && slice.cputype !== 0x01000007) continue;
+      const subRes = inspectRawClampBuffer(raw.subarray(slice.offset, slice.offset + slice.size));
+      if (subRes.state !== 'unknown') {
+        validHits.push({ slice, hit: subRes });
+      }
+    }
+    if (validHits.length === 0) return { state: 'unknown' };
+    const consensusState = validHits[0].hit.state;
+    if (validHits.some((item) => item.hit.state !== consensusState)) {
+      return { state: 'unknown' };
+    }
+    const preferredCpu = process.arch === 'x64' ? 0x01000007 : 0x0100000c;
+    const chosen = validHits.find((item) => item.slice.cputype === preferredCpu) || validHits[0];
+    return {
+      state: chosen.hit.state,
+      patchOffset: chosen.slice.offset + (chosen.hit.patchOffset ?? 0),
+      patternId: `fat-${chosen.hit.patternId}`,
+      isFatMachO: true,
+    };
+  }
+
   const macho = locateGoClampInMachO(raw);
+  const isMachX64 = Boolean(macho && macho.cputype === 0x01000007);
+  const isMachArm64 = Boolean(macho && !isMachX64);
   if (macho?.funcRange) {
-    const inFunc = scanArm64ClampInRange(raw, macho.funcRange.start, macho.funcRange.end, true);
-    if (inFunc === 'ambiguous') return { state: 'unknown' };
-    if (inFunc) {
-      return {
-        state: inFunc.state,
-        patchOffset: inFunc.patchOffset,
-        patternId: inFunc.patternId,
-        arm64Rt: inFunc.rt,
-      };
+    if (isMachX64) {
+      const inFuncX64 = scanX64ClampInRange(raw, macho.funcRange.start, macho.funcRange.end);
+      if (inFuncX64 === 'ambiguous') return { state: 'unknown' };
+      if (inFuncX64) {
+        return {
+          state: inFuncX64.state,
+          patchOffset: inFuncX64.patchOffset,
+          patternId: inFuncX64.patternId,
+          x64Site: inFuncX64,
+        };
+      }
+    } else {
+      const inFunc = scanArm64ClampInRange(raw, macho.funcRange.start, macho.funcRange.end, true);
+      if (inFunc === 'ambiguous') return { state: 'unknown' };
+      if (inFunc) {
+        return {
+          state: inFunc.state,
+          patchOffset: inFunc.patchOffset,
+          patternId: inFunc.patternId,
+          arm64Rt: inFunc.rt,
+        };
+      }
     }
   }
 
@@ -850,7 +910,7 @@ function inspectRawClampBuffer(raw) {
 
   const scanStart = macho?.textSectionRange?.start ?? pe?.textSectionRange?.start ?? 0;
   const scanEnd = macho?.textSectionRange?.end ?? pe?.textSectionRange?.end ?? raw.length;
-  if ((!pe || pe.machine === 0xaa64) && scanEnd - scanStart >= ARM64_CLAMP_WINDOW_BYTES) {
+  if ((!macho || isMachArm64) && (!pe || pe.machine === 0xaa64) && scanEnd - scanStart >= ARM64_CLAMP_WINDOW_BYTES) {
     const semanticHit = scanArm64ClampInRange(raw, scanStart, scanEnd, Boolean(macho || pe));
     if (semanticHit === 'ambiguous') return { state: 'unknown' };
     if (semanticHit) {
@@ -862,7 +922,7 @@ function inspectRawClampBuffer(raw) {
       };
     }
   }
-  if (!macho && (!pe || pe.machine === 0x8664) && scanEnd - scanStart >= 38) {
+  if ((!macho || isMachX64) && (!pe || pe.machine === 0x8664) && scanEnd - scanStart >= 38) {
     const x64Hit = scanX64ClampInRange(raw, scanStart, scanEnd);
     if (x64Hit === 'ambiguous') return { state: 'unknown' };
     if (x64Hit) {
@@ -891,6 +951,30 @@ function inspectRawClampBuffer(raw) {
 }
 
 export function buildPatchedClampBuffer(officialRaw, targetMode) {
+  const fatSlices = parseFatMachOSlices(officialRaw);
+  if (fatSlices) {
+    const patchedFat = Buffer.from(officialRaw);
+    let patchedCount = 0;
+    for (const slice of fatSlices) {
+      if (slice.cputype !== 0x0100000c && slice.cputype !== 0x01000007) continue;
+      const slicePatched = buildPatchedClampBuffer(
+        officialRaw.subarray(slice.offset, slice.offset + slice.size),
+        targetMode
+      );
+      if (!slicePatched || slicePatched.length !== slice.size) {
+        return null;
+      }
+      slicePatched.copy(patchedFat, slice.offset);
+      patchedCount += 1;
+    }
+    if (patchedCount === 0) return null;
+    const expectedState = resolveContextModeSpec(targetMode).expectedBinaryState;
+    if (inspectRawClampBuffer(patchedFat).state !== expectedState) {
+      return null;
+    }
+    return patchedFat;
+  }
+
   const scanned = inspectRawClampBuffer(officialRaw);
   if (scanned.state !== 'official-256k' || scanned.patchOffset === undefined) {
     return null;
@@ -1069,7 +1153,7 @@ export function inspectAntigravityContextBinary(executablePath) {
       const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw), 'utf8');
       const scanned = inspectRawClampBuffer(buf);
       if (scanned.state !== 'unknown') {
-        if (scanned.patchOffset !== undefined) {
+        if (scanned.patchOffset !== undefined && !scanned.isFatMachO) {
           ctxWinDynamicOffsetHints.add(scanned.patchOffset);
         }
         const result = {
@@ -1194,10 +1278,22 @@ export function resolveAntigravityDesktopAppPath(options = {}) {
   const platform = options.platform || process.platform;
   const home = homedir();
   if (platform === 'darwin') {
-    const candidates = ['/Applications/Antigravity.app', join(home, 'Applications', 'Antigravity.app')];
-    for (const appPath of candidates) {
-      if (safeLstat(join(appPath, 'Contents', 'Resources', 'bin', 'language_server'))) {
-        return appPath;
+    const candidates = [];
+    if (typeof process?.execPath === 'string' && /antigravity\.app\//i.test(process.execPath)) {
+      const rootFromExec = normalizeDesktopAppRoot(process.execPath);
+      if (rootFromExec) candidates.push(rootFromExec);
+    }
+    candidates.push(
+      '/Applications/Antigravity.app',
+      join(home, 'Applications', 'Antigravity.app'),
+      '/Applications/Utilities/Antigravity.app'
+    );
+    const macNames = ['language_server', 'language_server_macos_arm', 'language_server_macos_x64'];
+    for (const appPath of [...new Set(candidates)]) {
+      for (const lsName of macNames) {
+        if (safeLstat(join(appPath, 'Contents', 'Resources', 'bin', lsName))) {
+          return appPath;
+        }
       }
     }
     return undefined;
@@ -1233,12 +1329,20 @@ function resolveDesktopLayout(appPath, platform = process.platform) {
     existsSync(join(appPath, 'Contents', 'Resources', 'bin'));
   if (isMacBundle) {
     const binDir = join(appPath, 'Contents', 'Resources', 'bin');
+    const macCandidates = ['language_server', 'language_server_macos_arm', 'language_server_macos_x64'];
+    let lsFilename = 'language_server';
+    for (const cand of macCandidates) {
+      if (safeLstat(join(binDir, cand))) {
+        lsFilename = cand;
+        break;
+      }
+    }
     return {
       kind: 'macos-bundle',
       appPath,
       binDir,
-      lsFilename: 'language_server',
-      lsPath: join(binDir, 'language_server'),
+      lsFilename,
+      lsPath: join(binDir, lsFilename),
     };
   }
   const binDir = join(appPath, 'resources', 'bin');
@@ -1260,7 +1364,7 @@ function resolveDesktopLayout(appPath, platform = process.platform) {
   };
 }
 
-function resolveStandaloneAgyExecutable(options = {}) {
+export function resolveStandaloneAgyExecutable(options = {}) {
   if (options.agyExecutablePath === null) return undefined;
   if (typeof options.agyExecutablePath === 'string' && options.agyExecutablePath.trim()) {
     const p = options.agyExecutablePath.trim();
@@ -1878,12 +1982,40 @@ async function inspectRunningDesktopLanguageServer(layout, options = {}) {
   if (platform === 'darwin') {
     let diskRealPath = lsPath;
     let diskInode = 0;
+    let lsStat = null;
     try {
       diskRealPath = typeof realpathSync === 'function' ? realpathSync(lsPath) : lsPath;
-      diskInode = Number(statSync(diskRealPath).ino || 0);
+      lsStat = statSync(diskRealPath);
+      diskInode = Number(lsStat.ino || 0);
     } catch {
       return { running: false, matchesDisk: false };
     }
+    const probeKey = `darwin:${diskRealPath}:${diskInode}:${Number(lsStat.size || 0)}:${Number(lsStat.mtimeMs || 0)}`;
+    if (
+      !options.forceProcessProbe &&
+      ctxWinRunningProbeCache.key === probeKey &&
+      ctxWinRunningProbeCache.result
+    ) {
+      const ageMs = Date.now() - ctxWinRunningProbeCache.ts;
+      if (
+        ctxWinRunningProbeCache.pid > 0 &&
+        isCachedPidStillAlive(ctxWinRunningProbeCache.pid) &&
+        ageMs < 60_000
+      ) {
+        return ctxWinRunningProbeCache.result;
+      }
+      if (ctxWinRunningProbeCache.pid === 0 && ageMs < 15_000) {
+        return ctxWinRunningProbeCache.result;
+      }
+    }
+    const cacheMacProbe = (pid, resObj) => {
+      ctxWinRunningProbeCache.key = probeKey;
+      ctxWinRunningProbeCache.ts = Date.now();
+      ctxWinRunningProbeCache.pid = Number.isInteger(pid) && pid > 0 ? pid : 0;
+      ctxWinRunningProbeCache.result = resObj;
+      return resObj;
+    };
+
     const psOut = await new Promise((resolve) => {
       execFile('ps', ['-axo', 'pid=,command='], { timeout: 3_000 }, (err, out) =>
         resolve(err ? '' : String(out ?? ''))
@@ -1893,12 +2025,17 @@ async function inspectRunningDesktopLanguageServer(layout, options = {}) {
     for (const rawLine of psOut.split(/\r?\n/)) {
       const m = /^(\d+)\s+(.+)$/.exec(rawLine.trim());
       if (!m) continue;
-      if (m[2] === lsPath || m[2].startsWith(`${lsPath} `)) {
+      if (
+        m[2] === lsPath ||
+        m[2].startsWith(`${lsPath} `) ||
+        m[2] === diskRealPath ||
+        m[2].startsWith(`${diskRealPath} `)
+      ) {
         targetPid = Number(m[1]);
         break;
       }
     }
-    if (!targetPid) return { running: false, matchesDisk: true };
+    if (!targetPid) return cacheMacProbe(0, { running: false, matchesDisk: true });
     const lsofBin = existsSync('/usr/sbin/lsof') ? '/usr/sbin/lsof' : 'lsof';
     const lsofOut = await new Promise((resolve) => {
       execFile(lsofBin, ['-a', '-d', 'txt', '-p', String(targetPid), '-Fni'], { timeout: 3_000 }, (err, out) =>
@@ -1923,12 +2060,12 @@ async function inspectRunningDesktopLanguageServer(layout, options = {}) {
         }
       }
     }
-    if (!activeTxtPath) return { running: true, pid: targetPid, matchesDisk: true };
-    return {
+    if (!activeTxtPath) return cacheMacProbe(targetPid, { running: true, pid: targetPid, matchesDisk: true });
+    return cacheMacProbe(targetPid, {
       running: true,
       pid: targetPid,
       matchesDisk: activeInode !== undefined && diskInode > 0 ? activeInode === diskInode : activeTxtPath === diskRealPath,
-    };
+    });
   }
 
   return { running: false, matchesDisk: true };
@@ -2133,11 +2270,20 @@ async function switchStandaloneDesktopLocked(targetMode, layout, options = {}) {
   }
 }
 
+function formatMacFsError(err) {
+  const msg = String(err?.message || err || '');
+  if (/EACCES|EPERM|EROFS|Operation not permitted|Permission denied|Read-only file system/i.test(msg)) {
+    return `${msg}（请确认 Antigravity.app 位于 /Applications 且当前账号拥有写权限）`;
+  }
+  return msg;
+}
+
 async function switchMacBundleDesktopLocked(targetMode, layout, options = {}) {
-  const { appPath, lsPath } = layout;
+  const { appPath, lsPath, lsFilename } = layout;
+  const macLsFilename = lsFilename || 'language_server';
   const syncDir = resolveContextSyncDir(options);
   const officialAppBackupPath = join(syncDir, 'Antigravity.official.app');
-  const officialBackupPath = join(officialAppBackupPath, 'Contents', 'Resources', 'bin', 'language_server');
+  const officialBackupPath = join(officialAppBackupPath, 'Contents', 'Resources', 'bin', macLsFilename);
   const metaPath = join(syncDir, 'context-meta.json');
   const appVersion = readDesktopAppVersionSync(appPath);
 
@@ -2240,7 +2386,7 @@ async function switchMacBundleDesktopLocked(targetMode, layout, options = {}) {
       return { ok: true, installed: true, mode: '256k', appVersion };
     } catch (err) {
       rmSync(stageRestoreApp, { recursive: true, force: true });
-      return { ok: false, installed: true, mode: '256k', error: `还原整包失败：${err?.message || err}` };
+      return { ok: false, installed: true, mode: '256k', error: `还原整包失败：${formatMacFsError(err)}` };
     }
   }
 
@@ -2271,7 +2417,7 @@ async function switchMacBundleDesktopLocked(targetMode, layout, options = {}) {
   }
 
   const stageApp = join(dirname(appPath), `.Antigravity.metabot-stage-${process.pid || 0}-${Date.now()}.app`);
-  const stagedLsPath = join(stageApp, 'Contents', 'Resources', 'bin', 'language_server');
+  const stagedLsPath = join(stageApp, 'Contents', 'Resources', 'bin', macLsFilename);
   const stagedMainExecPath = join(stageApp, 'Contents', 'MacOS', 'Antigravity');
 
   try {
@@ -2323,7 +2469,7 @@ async function switchMacBundleDesktopLocked(targetMode, layout, options = {}) {
     return { ok: true, installed: true, mode: targetMode, appVersion };
   } catch (err) {
     rmSync(stageApp, { recursive: true, force: true });
-    return { ok: false, installed: true, mode: targetMode, error: `切换失败：${err?.message || err}` };
+    return { ok: false, installed: true, mode: targetMode, error: `切换失败：${formatMacFsError(err)}` };
   }
 }
 
@@ -2439,6 +2585,7 @@ function withContextSwitchLock(taskFn) {
  */
 export async function getContextWindowControlSnapshot(options = {}) {
   const now = Date.now();
+  const effectivePlatform = options.platform || process.platform;
   const hasCustomOpts = Boolean(
     options.desktopAppPath !== undefined ||
       options.desktopSyncDir !== undefined ||
@@ -2460,6 +2607,7 @@ export async function getContextWindowControlSnapshot(options = {}) {
 
   if (!appPath && !agyPath) {
     const emptySnap = {
+      platform: effectivePlatform,
       supported: false,
       installed: false,
       mode: policyRecord?.mode || '256k',
@@ -2485,15 +2633,16 @@ export async function getContextWindowControlSnapshot(options = {}) {
   let runningStatus = { running: false, matchesDisk: true };
 
   if (appPath) {
-    const layout = resolveDesktopLayout(appPath, options.platform || process.platform);
+    const layout = resolveDesktopLayout(appPath, effectivePlatform);
     const syncDir = resolveContextSyncDir(options);
     const officialBackupPath =
       layout.kind === 'macos-bundle'
-        ? join(syncDir, 'Antigravity.official.app', 'Contents', 'Resources', 'bin', 'language_server')
+        ? join(syncDir, 'Antigravity.official.app', 'Contents', 'Resources', 'bin', layout.lsFilename)
         : join(syncDir, `${layout.lsFilename}.official`);
     const lsInfo = inspectDesktopLsFile(layout.lsPath);
     if (!lsInfo.lstatExists) {
       const missingSnap = {
+        platform: effectivePlatform,
         supported: false,
         installed: false,
         mode: policyRecord?.mode || '256k',
@@ -2535,6 +2684,7 @@ export async function getContextWindowControlSnapshot(options = {}) {
   );
 
   const snapshot = {
+    platform: effectivePlatform,
     supported,
     installed: true,
     mode,

@@ -61,7 +61,11 @@ export function resolveDevToolsPortCandidates(
     ];
   }
   if (platform === 'darwin') {
-    return [join(homeDir, 'Library', 'Application Support', 'Antigravity', 'DevToolsActivePort')];
+    return [
+      join(homeDir, 'Library', 'Application Support', 'Antigravity', 'DevToolsActivePort'),
+      join(homeDir, 'Library', 'Application Support', 'antigravity', 'DevToolsActivePort'),
+      join(homeDir, '.config', 'Antigravity', 'DevToolsActivePort'),
+    ];
   }
   const configHome = env?.XDG_CONFIG_HOME || join(homeDir, '.config');
   return [join(configHome, 'Antigravity', 'DevToolsActivePort')];

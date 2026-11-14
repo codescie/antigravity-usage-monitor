@@ -514,8 +514,36 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-4);
+  flex-wrap: wrap;
+  gap: 4px var(--space-4);
   padding-top: var(--space-2);
   font-size: 11px;
   color: var(--text-secondary);
+}
+
+@container view-pane (max-width: 400px) {
+  .month-cost {
+    font-size: 8.5px;
+  }
+  .month-label {
+    font-size: 9px;
+    padding: 1px 1px;
+  }
+  .month-tok {
+    display: none;
+  }
+}
+
+@container view-pane (max-width: 350px) {
+  .cons-matrix-bottom.cons-split-3 {
+    grid-template-columns: 1fr;
+  }
+  .cons-matrix-bottom .cons-col {
+    padding-left: 0;
+    padding-right: 0;
+  }
+  .cons-matrix-bottom .cons-col.is-bordered-col {
+    border-left: none;
+    border-top: 1px solid var(--border-hairline);
+  }
 }

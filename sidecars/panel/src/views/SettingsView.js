@@ -155,10 +155,10 @@ export const SettingsView = defineComponent({
     let detectorFeedbackTimer = null;
     let detectorPollTimer = null;
 
-    const saveStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
-    const topbarStatusText = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
-    const cloudStatusMsg = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
-    const detectorStatusMsg = h('span', { className: 'text-muted', style: 'font-size: 11px;', text: '' });
+    const saveStatusText = h('span', { className: 'text-muted panel-feedback', text: '' });
+    const topbarStatusText = h('span', { className: 'text-muted panel-feedback', text: '' });
+    const cloudStatusMsg = h('span', { className: 'text-muted panel-feedback', text: '' });
+    const detectorStatusMsg = h('span', { className: 'text-muted panel-feedback', text: '' });
 
     /** 在常规设置面板右上角展示短暂的保存状态提示 */
     function showSaveFeedback(text) {
@@ -839,7 +839,7 @@ export const SettingsView = defineComponent({
     ]);
 
     // --- 检测结论与候选排名面板 ---
-    const verdictMetaText = h('span', { className: 'panel-meta', text: '' });
+    const verdictMetaText = h('span', { className: 'panel-meta detector-verdict-meta', text: '' });
     const detectorEmptyNote = h('div', {
       className: 'detector-empty-note',
       text: '默认检测当前窗口模型。通过 3 路多语种无语义整数分布数学比对模型底层权重，不污染当前对话上下文。',

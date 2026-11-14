@@ -6,6 +6,10 @@
 
 :root,
 :host {
+  /* Typography Tokens (macOS SF Pro / SF Mono + Cross-Platform Fallback) */
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto, sans-serif;
+  --font-mono: "SF Mono", ui-monospace, Menlo, Monaco, "Cascadia Mono", Consolas, monospace;
+
   /* Architectural Geometry: Only Top Nav uses --radius-pill */
   --radius-pill: 999px;
   --radius-sm: 4px;

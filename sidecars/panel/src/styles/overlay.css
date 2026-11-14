@@ -23,6 +23,7 @@
   letter-spacing: 0.015em;
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   color: var(--text-primary);
   z-index: 2147482900;
 }
@@ -36,6 +37,10 @@
   position: fixed;
   top: 6px;
   right: 144px;
+}
+
+:host(.wm-capsule-host[data-dock="fixed"][data-os="mac"]) {
+  right: 12px;
 }
 
 @keyframes wm-dot-pulse {

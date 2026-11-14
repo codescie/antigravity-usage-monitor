@@ -33,6 +33,7 @@ import {
   formatAgentLabel,
   formatContextTierLabel,
   getAgentBadgeClass,
+  isMacHostPlatform,
   resolveScopedConversation,
   switchContextWindow,
   telemetryStore,
@@ -1120,8 +1121,13 @@ export const LiveOverviewView = defineComponent({
           statusText = '当前客户端版本特征暂未匹配';
           statusTitle = statusText;
         } else if (ctxCtrl.needsRestart) {
-          statusText = `已切 ${activeLabel} · 重启窗口生效`;
-          statusTitle = `磁盘二进制与全局策略已切换为 ${activeLabel}；当前运行中的 language_server 需重开反重力窗口后按新水位压缩`;
+          if (isMacHostPlatform(data)) {
+            statusText = `已切 ${activeLabel} · 完全退出重开生效`;
+            statusTitle = `磁盘应用包与全局策略已切换为 ${activeLabel}；macOS 下请按 Cmd+Q 完全退出并重新打开 Antigravity 生效`;
+          } else {
+            statusText = `已切 ${activeLabel} · 重启窗口生效`;
+            statusTitle = `磁盘二进制与全局策略已切换为 ${activeLabel}；当前运行中的 language_server 需重开反重力窗口后按新水位压缩`;
+          }
         }
 
         patchText(ctxTierStatusEl, statusText);

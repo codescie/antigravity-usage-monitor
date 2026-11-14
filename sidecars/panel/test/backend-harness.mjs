@@ -72,7 +72,7 @@ export function backendHarness({
   const touchVirtual=(norm)=>{const t=++state.virtualTick;state.virtualMtimes.set(norm,t);return t;};
   const ctx={
     ...metricsImplementation, URL, AbortSignal, Buffer, crypto, zlib, setTimeout, clearTimeout, DataView, Float32Array, Uint8Array,
-    process:{platform:'win32',env:{ANTIGRAVITY_EXECUTABLE_DATA_DIR:'/test-data',ANTIGRAVITY_LS_ADDRESS:'test.invalid',ANTIGRAVITY_CSRF_TOKEN:'test'}},
+    process:{pid:process.pid,kill:process.kill.bind(process),platform:'win32',env:{ANTIGRAVITY_EXECUTABLE_DATA_DIR:'/test-data',ANTIGRAVITY_LS_ADDRESS:'test.invalid',ANTIGRAVITY_CSRF_TOKEN:'test'}},
     console:{error:m=>state.errors.push(m)},
     cpSync:()=>{},
     rmSync:()=>{},
@@ -160,6 +160,7 @@ export function backendHarness({
         return {
           mtimeMs: ts,
           ctimeMs: ts,
+          ino: 1000 + norm.length,
           size: buf.length,
           isFile: () => true,
           isDirectory: () => false,
@@ -237,6 +238,6 @@ export function backendHarness({
       return {ok:true,json:async()=>data||{}};
     },
   };
-  vm.runInNewContext(source+'\n globalThis.api={buildTelemetryPayloadInternal,computeStepCost,resolveModelInfo,inferFamilyFromProviderOrKey,isArgonModelIdentifier,isCarbonModelIdentifier,getBaseModelLabel,formatUpstreamModelId,PLACEHOLDER_MAP,normalizeQuotaFraction,classifyOfficialBucketWindow,classifyQuotaPoolIdentity,buildOfficialQuotaPools,resolveTimeWindow,sanitizeCatalogPayload,rebuildActiveCatalog,syncCloudCatalog,getCloudStatus,isValidSemver,compareSemver,performPluginUpdate,resolveMigratedGitRemoteUrl,loadSettings,executeSettingsAction,dispatchBridgeApiRequest,ensureDetectorEngine,resolveAntigravityDetectorCatalog,resolveProbeExecutionModel,extractTieredModelBase,getModelDetectorStatus,startAntigravityModelDetection,cancelAntigravityModelDetection,syncDetectorBank,suggestAntigravityReference,CONTEXT_WINDOW_MODES,AGY_CLAMP_X64_UNPATCHED_HEX,normalizeContextWindowMode,decodeArm64ClampAt,decodeX64ClampAt,buildPatchedClampBuffer,inspectAntigravityContextBinary,resolveAntigravityDesktopAppPath,getContextWindowControlSnapshot,switchContextWindowMode,ensureContextWindowAlignedOnBoot,clearContextWindowCachesForTests};',ctx);
+  vm.runInNewContext(source+'\n globalThis.api={buildTelemetryPayloadInternal,computeStepCost,resolveModelInfo,inferFamilyFromProviderOrKey,isArgonModelIdentifier,isCarbonModelIdentifier,getBaseModelLabel,formatUpstreamModelId,PLACEHOLDER_MAP,normalizeQuotaFraction,classifyOfficialBucketWindow,classifyQuotaPoolIdentity,buildOfficialQuotaPools,resolveTimeWindow,sanitizeCatalogPayload,rebuildActiveCatalog,syncCloudCatalog,getCloudStatus,isValidSemver,compareSemver,performPluginUpdate,resolveMigratedGitRemoteUrl,loadSettings,executeSettingsAction,dispatchBridgeApiRequest,ensureDetectorEngine,resolveAntigravityDetectorCatalog,resolveProbeExecutionModel,extractTieredModelBase,resolveAgentApiBinary,getModelDetectorStatus,startAntigravityModelDetection,cancelAntigravityModelDetection,syncDetectorBank,suggestAntigravityReference,CONTEXT_WINDOW_MODES,AGY_CLAMP_X64_UNPATCHED_HEX,normalizeContextWindowMode,decodeArm64ClampAt,decodeX64ClampAt,buildPatchedClampBuffer,inspectAntigravityContextBinary,resolveAntigravityDesktopAppPath,getContextWindowControlSnapshot,switchContextWindowMode,ensureContextWindowAlignedOnBoot,clearContextWindowCachesForTests};',ctx);
   return {...ctx.api,state};
 }

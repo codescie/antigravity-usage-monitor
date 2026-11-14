@@ -40,6 +40,8 @@ test('DevToolsActivePort parsing, cross-platform discovery, and strict target/or
 
   const macPaths = resolveDevToolsPortCandidates({}, 'darwin', '/Users/dev');
   assert.equal(macPaths[0], path.join('/Users/dev', 'Library', 'Application Support', 'Antigravity', 'DevToolsActivePort'));
+  assert.ok(macPaths.includes(path.join('/Users/dev', 'Library', 'Application Support', 'antigravity', 'DevToolsActivePort')));
+  assert.ok(macPaths.includes(path.join('/Users/dev', '.config', 'Antigravity', 'DevToolsActivePort')));
 
   assert.equal(
     isAntigravityMainPageTarget({
@@ -1342,6 +1344,60 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     assert.equal(ov.updateBridge({ port: 51234, token: 'rotated-token-456' }), true);
     assert.equal(mockWindow.__AGUsageMonitorBridge.port, 51234);
     assert.equal(mockDocument.getElementById('ag-usage-monitor-capsule'), capsuleHost);
+
+    // Switch live telemetry to macOS (hostPlatform='darwin') and verify UI chrome & copy adaptation
+    fetchShouldFail = false;
+    mockWindow.__AGUsageMonitorBridge.transportMode = 'http';
+    mockLocation.pathname = '/c/mac00000-1111-2222-3333-444444444444';
+    mockWindow.fetch = async (url) => {
+      if (String(url).includes('/api/telemetry')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            hostPlatform: 'darwin',
+            uiBundleVersion: 'ver-200',
+            settings: { enableWindowOverlay: true },
+            contextWindowControl: {
+              platform: 'darwin',
+              installed: true,
+              supported: true,
+              mode: '768k',
+              diskMode: '768k',
+              targetTokens: 786432,
+              needsRestart: true,
+              runningMatchesDisk: false,
+            },
+            activeConversation: {
+              cascadeId: 'mac00000-1111-2222-3333-444444444444',
+              title: 'macOS UI Check',
+              isRunning: false,
+              stepCount: 1,
+              context: { totalTokens: 64000, compactionLimitTokens: 786432, limitTokens: 786432 },
+              recentSteps: [],
+            },
+            consumption: { selectedRange: { key: 'today', label: '今天', startMs: 1, endMs: 2 }, session: {}, account: {}, trendSeries: [], monthlySeries: [] },
+            quotas: null,
+            modelBreakdown: [],
+          }),
+        };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+    pillTabs[0].dispatchEvent({ type: 'click', stopPropagation() {} });
+    const refreshBtn = popoverEl.querySelector('.icon-btn');
+    refreshBtn.dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 260));
+    assert.equal(capsuleHost.getAttribute('data-os'), 'mac', 'macOS host sets data-os="mac" on capsule');
+    const overviewTierStatus = popoverEl.querySelector('.ctx-tier-status');
+    assert.ok(overviewTierStatus, 'Context tier status rendered on overview');
+    assert.equal(overviewTierStatus.textContent, '已切 768K · 完全退出重开生效');
+    assert.equal(capsuleHost.getAttribute('data-dock'), 'flow', 'Titlebar dock stays active when titlebar is present');
+    assert.equal(capsuleHost.style.right || '', '', 'Dock flow leaves inline fixed right offset cleared');
+    assert.ok(
+      stylesCss.includes('[data-dock="fixed"][data-os="mac"]') && stylesCss.includes('right: 12px'),
+      'Compiled styles.css includes macOS 12px fixed fallback right offset'
+    );
   } finally {
     mockWindow.__AGUsageMonitorOverlay?.dispose?.();
     assert.equal(mockDocument.getElementById('ag-usage-monitor-capsule'), null);

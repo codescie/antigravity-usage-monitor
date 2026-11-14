@@ -155,6 +155,7 @@ function isEquivalentTelemetry(prev, next) {
   const pCtxCtrl = prev.contextWindowControl;
   const nCtxCtrl = next.contextWindowControl;
   if (
+    pCtxCtrl?.platform !== nCtxCtrl?.platform ||
     pCtxCtrl?.supported !== nCtxCtrl?.supported ||
     pCtxCtrl?.installed !== nCtxCtrl?.installed ||
     pCtxCtrl?.mode !== nCtxCtrl?.mode ||
@@ -847,6 +848,18 @@ export async function syncModelDetector({ knownModels = [] } = {}) {
   });
   void fetchTelemetry({ force: true });
   return res;
+}
+
+export function isMacHostPlatform(telemetry) {
+  const p = String(telemetry?.contextWindowControl?.platform || telemetry?.hostPlatform || '')
+    .trim()
+    .toLowerCase();
+  if (p) return p === 'darwin';
+  if (typeof navigator !== 'undefined') {
+    const ua = String(navigator.platform || navigator.userAgent || '');
+    return /mac|darwin|iphone|ipad/i.test(ua);
+  }
+  return false;
 }
 
 export function formatContextTierLabel(mode) {

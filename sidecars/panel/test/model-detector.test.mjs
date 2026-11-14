@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 import { backendHarness } from './backend-harness.mjs';
 
@@ -676,5 +677,41 @@ test('Regression: archived probe ledger keeps email accountName so deleted probe
     payload.consumption.account.totalTokens,
     3 * (1200 + 350),
     'Archived probe input + output tokens preserved under matching email accountName'
+  );
+});
+
+test('resolveAgentApiBinary resolves macOS app bundle, Linux install, and standalone agy CLI paths', () => {
+  const macEnv = backendHarness({});
+  const macLsArm = path.join('/Applications/Antigravity.app', 'Contents', 'Resources', 'bin', 'language_server_macos_arm');
+  macEnv.state.virtualFiles.set(macLsArm.replace(/\\/g, '/'), Buffer.from('stub'));
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(macEnv.resolveAgentApiBinary({ platform: 'darwin', homeDir: '/Users/dev', env: {} }))),
+    { cmd: macLsArm, prefixArgs: ['agentapi'] }
+  );
+
+  const linuxEnv = backendHarness({});
+  const linuxLs = path.join('/opt/Antigravity', 'resources', 'bin', 'language_server');
+  linuxEnv.state.virtualFiles.set(linuxLs.replace(/\\/g, '/'), Buffer.from('stub'));
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(linuxEnv.resolveAgentApiBinary({ platform: 'linux', homeDir: '/home/dev', env: {} }))),
+    { cmd: linuxLs, prefixArgs: ['agentapi'] }
+  );
+
+  const cliFallbackEnv = backendHarness({});
+  const agyCli = '/opt/homebrew/bin/agy';
+  cliFallbackEnv.state.virtualFiles.set(agyCli, Buffer.from('stub'));
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        cliFallbackEnv.resolveAgentApiBinary({
+          platform: 'darwin',
+          homeDir: '/Users/dev',
+          env: {},
+          desktopAppPath: null,
+          agyExecutablePath: agyCli,
+        })
+      )
+    ),
+    { cmd: agyCli, prefixArgs: ['agentapi'] }
   );
 });

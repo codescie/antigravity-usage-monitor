@@ -17,6 +17,7 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import zlib from 'node:zlib';
 import { extractModelSteps } from '../speed-metrics.mjs';
@@ -31,6 +32,10 @@ import {
   saveJson,
   trajectoryCache,
 } from './config.mjs';
+import {
+  resolveAntigravityDesktopAppPath,
+  resolveStandaloneAgyExecutable,
+} from './context-window-manager.mjs';
 import { callLsRpc } from './ls-rpc.mjs';
 import {
   REQUIRED_BANK_ASSETS,
@@ -692,26 +697,69 @@ export async function resolveAntigravityDetectorCatalog({
   };
 }
 
-function resolveAgentApiBinary() {
-  const envExe = String(process.env.ANTIGRAVITY_AGENTAPI_EXE || '').trim();
+export function resolveAgentApiBinary(options = {}) {
+  const env = options.env || process.env || {};
+  const platform = options.platform || process.platform;
+  const home = options.homeDir || homedir();
+  const envExe = String(env.ANTIGRAVITY_AGENTAPI_EXE || '').trim();
   if (envExe) {
     return { cmd: envExe, prefixArgs: ['agentapi'] };
   }
-  if (process.platform === 'win32') {
-    const localAppData = process.env.LOCALAPPDATA || '';
-    if (localAppData) {
-      const candidate = join(
-        localAppData,
-        'Programs',
-        'antigravity',
-        'resources',
-        'bin',
-        'language_server.exe'
-      );
-      if (existsSync(candidate)) {
-        return { cmd: candidate, prefixArgs: ['agentapi'] };
+
+  const desktopApp = resolveAntigravityDesktopAppPath({
+    platform,
+    desktopAppPath: options.desktopAppPath,
+  });
+  if (desktopApp) {
+    const binDir =
+      platform === 'darwin' || desktopApp.toLowerCase().endsWith('.app')
+        ? join(desktopApp, 'Contents', 'Resources', 'bin')
+        : join(desktopApp, 'resources', 'bin');
+    const names =
+      platform === 'win32'
+        ? ['language_server.exe']
+        : ['language_server', 'language_server_macos_arm', 'language_server_macos_x64'];
+    for (const name of names) {
+      const cand = join(binDir, name);
+      if (existsSync(cand)) {
+        return { cmd: cand, prefixArgs: ['agentapi'] };
       }
     }
+  }
+
+  if (platform === 'win32') {
+    const localAppData = env.LOCALAPPDATA || join(home, 'AppData', 'Local');
+    const winCandidates = [
+      join(localAppData, 'Programs', 'antigravity', 'resources', 'bin', 'language_server.exe'),
+      join(localAppData, 'Programs', 'Antigravity', 'resources', 'bin', 'language_server.exe'),
+    ];
+    for (const cand of winCandidates) {
+      if (existsSync(cand)) {
+        return { cmd: cand, prefixArgs: ['agentapi'] };
+      }
+    }
+  } else if (platform === 'darwin') {
+    const macApps = ['/Applications/Antigravity.app', join(home, 'Applications', 'Antigravity.app')];
+    for (const app of macApps) {
+      for (const name of ['language_server', 'language_server_macos_arm', 'language_server_macos_x64']) {
+        const cand = join(app, 'Contents', 'Resources', 'bin', name);
+        if (existsSync(cand)) {
+          return { cmd: cand, prefixArgs: ['agentapi'] };
+        }
+      }
+    }
+  } else {
+    for (const dir of ['/opt/Antigravity', '/usr/lib/antigravity', '/usr/share/antigravity']) {
+      const cand = join(dir, 'resources', 'bin', 'language_server');
+      if (existsSync(cand)) {
+        return { cmd: cand, prefixArgs: ['agentapi'] };
+      }
+    }
+  }
+
+  const agyCli = resolveStandaloneAgyExecutable({ agyExecutablePath: options.agyExecutablePath });
+  if (agyCli) {
+    return { cmd: agyCli, prefixArgs: ['agentapi'] };
   }
   return { cmd: 'agentapi', prefixArgs: [] };
 }

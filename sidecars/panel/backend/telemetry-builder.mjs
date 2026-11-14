@@ -1166,6 +1166,7 @@ export async function buildTelemetryPayloadInternal(
 
   return {
     timestamp: new Date().toISOString(),
+    hostPlatform: process.platform || 'unknown',
     uiBundleVersion,
     settings,
     contextWindowControl: contextWindowControl || null,

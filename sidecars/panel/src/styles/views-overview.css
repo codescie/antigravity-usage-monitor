@@ -681,3 +681,22 @@
     grid-template-columns: 1fr;
   }
 }
+
+@container view-pane (max-width: 390px) {
+  .telemetry-matrix {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .dual-grid {
+    grid-template-columns: 1fr;
+  }
+  .ctx-tier-bar {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+}
+
+@container view-pane (max-width: 345px) {
+  .ctx-legend-grid {
+    grid-template-columns: 1fr;
+  }
+}

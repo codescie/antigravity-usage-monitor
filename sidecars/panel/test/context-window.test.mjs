@@ -474,3 +474,201 @@ test('Regression: win32 snapshot caches SHA-256 and process probe until binary c
 function existsCheckCountSafe() {
   return true;
 }
+
+/**
+ * 构造最小合法 Mach-O 64位镜象（支持 ARM64 0x0100000c 或 Intel x86_64 0x01000007）。
+ */
+function buildSyntheticMachO64ClampBinary({ cputype = 0x01000007 } = {}) {
+  const isX64 = cputype === 0x01000007;
+  const clampBuf = isX64
+    ? Buffer.from(AGY_CLAMP_X64_UNPATCHED_HEX, 'hex')
+    : buildArm64ClampWindowBuffer();
+
+  const totalSize = 0x1000;
+  const buf = Buffer.alloc(totalSize, 0);
+  // Mach-O 64-bit header (magic 0xfeedfacf LE)
+  buf.writeUInt32LE(0xfeedfacf, 0);
+  buf.writeUInt32LE(cputype >>> 0, 4);
+  buf.writeUInt32LE(0, 8);
+  buf.writeUInt32LE(2, 12); // MH_EXECUTE
+  buf.writeUInt32LE(1, 16); // ncmds = 1
+  buf.writeUInt32LE(232, 20); // sizeofcmds = 72 + 2*80
+
+  // LC_SEGMENT_64 (0x19) __TEXT with 2 sections (__text, __lrodata_gopcln)
+  const cmdOff = 32;
+  buf.writeUInt32LE(0x19, cmdOff);
+  buf.writeUInt32LE(232, cmdOff + 4);
+  buf.write('__TEXT\0\0\0\0\0\0\0\0\0\0', cmdOff + 8, 16, 'ascii');
+  buf.writeBigUInt64LE(0x100000000n, cmdOff + 24); // vmaddr
+  buf.writeBigUInt64LE(0x1000n, cmdOff + 32);
+  buf.writeBigUInt64LE(0n, cmdOff + 40); // fileoff
+  buf.writeBigUInt64LE(0x1000n, cmdOff + 48);
+  buf.writeUInt32LE(2, cmdOff + 64); // nsects
+
+  // Section 0: __text (addr 0x100000400, size 0x400, offset 0x400)
+  const s0 = cmdOff + 72;
+  buf.write('__text\0\0\0\0\0\0\0\0\0\0', s0, 16, 'ascii');
+  buf.write('__TEXT\0\0\0\0\0\0\0\0\0\0', s0 + 16, 16, 'ascii');
+  buf.writeBigUInt64LE(0x100000400n, s0 + 32);
+  buf.writeBigUInt64LE(0x400n, s0 + 40);
+  buf.writeUInt32LE(0x400, s0 + 48);
+
+  // Section 1: __lrodata_gopcln (addr 0x100000800, size 0x600, offset 0x800)
+  const s1 = s0 + 80;
+  buf.write('__lrodata_gopcln', s1, 16, 'ascii');
+  buf.write('__TEXT\0\0\0\0\0\0\0\0\0\0', s1 + 16, 16, 'ascii');
+  buf.writeBigUInt64LE(0x100000800n, s1 + 32);
+  buf.writeBigUInt64LE(0x600n, s1 + 40);
+  buf.writeUInt32LE(0x800, s1 + 48);
+
+  // Copy clamp sequence at file offset 0x480
+  clampBuf.copy(buf, 0x480);
+
+  // Write Go 1.20+ gopclntab at 0x800
+  const pcln = 0x800;
+  buf.writeUInt32LE(0xfffffff1, pcln);
+  buf[pcln + 6] = 1;
+  buf[pcln + 7] = 8;
+  buf.writeBigUInt64LE(1n, pcln + 8);
+  buf.writeBigUInt64LE(0x100000400n, pcln + 24);
+  buf.writeBigUInt64LE(0x80n, pcln + 32);
+  buf.writeBigUInt64LE(0x140n, pcln + 64);
+
+  const fnName = 'pkg.(*ModelConfig).ClampCheckpointConfigForModelInfo\0';
+  buf.write(fnName, pcln + 0x80, 'ascii');
+
+  const ft = pcln + 0x140;
+  buf.writeUInt32LE(0x60, ft);
+  buf.writeUInt32LE(0x20, ft + 4);
+  buf.writeUInt32LE(0x120, ft + 8);
+  buf.writeUInt32LE(0x60, ft + 0x20);
+  buf.writeInt32LE(0, ft + 0x24);
+
+  return buf;
+}
+
+/**
+ * 将 ARM64 + Intel x86_64 两个 Mach-O 切片封装为 macOS Universal Fat Binary (0xcafebabe)。
+ */
+function buildUniversalFatMachOClampBinary() {
+  const armSlice = buildSyntheticMachO64ClampBinary({ cputype: 0x0100000c });
+  const x64Slice = buildSyntheticMachO64ClampBinary({ cputype: 0x01000007 });
+  const armOff = 0x1000;
+  const x64Off = armOff + armSlice.length;
+  const fat = Buffer.alloc(x64Off + x64Slice.length, 0);
+
+  fat.writeUInt32BE(0xcafebabe, 0);
+  fat.writeUInt32BE(2, 4);
+  // Slice 0: ARM64
+  fat.writeUInt32BE(0x0100000c, 8);
+  fat.writeUInt32BE(0, 12);
+  fat.writeUInt32BE(armOff, 16);
+  fat.writeUInt32BE(armSlice.length, 20);
+  fat.writeUInt32BE(12, 24);
+  // Slice 1: x86_64
+  fat.writeUInt32BE(0x01000007, 28);
+  fat.writeUInt32BE(3, 32);
+  fat.writeUInt32BE(x64Off, 36);
+  fat.writeUInt32BE(x64Slice.length, 40);
+  fat.writeUInt32BE(12, 44);
+
+  armSlice.copy(fat, armOff);
+  x64Slice.copy(fat, x64Off);
+  return fat;
+}
+
+test('macOS Intel x86_64 Mach-O & Universal Fat Mach-O binary detection and patching across all tiers', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'um-mac-fat-'));
+  try {
+    // 1. Thin Intel x86_64 Mach-O roundtrip
+    const x64Mach = buildSyntheticMachO64ClampBinary({ cputype: 0x01000007 });
+    const x64Path = path.join(tmpDir, 'ls_x64');
+    fs.writeFileSync(x64Path, x64Mach);
+    assert.equal(inspectAntigravityContextBinary(x64Path).state, 'official-256k');
+    for (const [mode, expected] of [
+      ['512k', 'patched-512k'],
+      ['768k', 'patched-768k'],
+      ['1m', 'patched-1m'],
+    ]) {
+      const patched = buildPatchedClampBuffer(x64Mach, mode);
+      assert.ok(patched, `Intel Mach-O patched cleanly for ${mode}`);
+      const outPath = path.join(tmpDir, `ls_x64_${mode}`);
+      fs.writeFileSync(outPath, patched);
+      assert.equal(inspectAntigravityContextBinary(outPath).state, expected);
+    }
+
+    // 2. Universal Fat Mach-O patches BOTH ARM64 and x86_64 slices consistently
+    const fatMach = buildUniversalFatMachOClampBinary();
+    const fatPath = path.join(tmpDir, 'ls_universal');
+    fs.writeFileSync(fatPath, fatMach);
+    assert.equal(inspectAntigravityContextBinary(fatPath).state, 'official-256k');
+    for (const [mode, expected] of [
+      ['512k', 'patched-512k'],
+      ['768k', 'patched-768k'],
+      ['1m', 'patched-1m'],
+    ]) {
+      const patchedFat = buildPatchedClampBuffer(fatMach, mode);
+      assert.ok(patchedFat, `Universal Fat Mach-O patched cleanly for ${mode}`);
+      const outPath = path.join(tmpDir, `ls_fat_${mode}`);
+      fs.writeFileSync(outPath, patchedFat);
+      assert.equal(inspectAntigravityContextBinary(outPath).state, expected);
+      // Verify individual embedded slices match target state
+      const armPatchedSlice = patchedFat.subarray(0x1000, 0x2000);
+      const x64PatchedSlice = patchedFat.subarray(0x2000, 0x3000);
+      assert.equal(decodeArm64ClampAt(armPatchedSlice, 0x480)?.state, expected);
+      assert.equal(decodeX64ClampAt(x64PatchedSlice, 0x480)?.state, expected);
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('Regression: macOS darwin snapshot caches ps/lsof process probe and exposes platform=darwin', async () => {
+  const macLsPath = path.join('/test-mac/Antigravity.app', 'Contents', 'Resources', 'bin', 'language_server_macos_arm');
+  const normMacLsPath = macLsPath.replace(/\\/g, '/');
+  const armMach = buildSyntheticMachO64ClampBinary({ cputype: 0x0100000c });
+  let psCalls = 0;
+  let lsofCalls = 0;
+
+  const env = backendHarness({
+    settings: {},
+    execFileImpl: (cmd, _args, _opts, cb) => {
+      const bin = String(cmd || '').toLowerCase();
+      if (bin === 'ps') {
+        psCalls += 1;
+        cb(null, `${process.pid} ${macLsPath} --stdio\n`, '');
+        return;
+      }
+      if (bin.includes('lsof')) {
+        lsofCalls += 1;
+        cb(null, `ftxt\ni1\nn${macLsPath}\n`, '');
+        return;
+      }
+      cb(new Error('unexpected execFile'));
+    },
+  });
+
+  env.state.virtualFiles.set(normMacLsPath, Buffer.from(armMach));
+  env.state.virtualMtimes.set(normMacLsPath, 3000);
+
+  const opts = {
+    platform: 'darwin',
+    desktopAppPath: '/test-mac/Antigravity.app',
+    desktopSyncDir: '/test-mac-sync',
+    policyFilePath: '/test-mac-home/.gemini/antigravity-context-policy.json',
+    allowProcessProbeInTest: true,
+    forceRefresh: true,
+  };
+
+  const snap1 = await env.getContextWindowControlSnapshot(opts);
+  assert.equal(snap1.platform, 'darwin');
+  assert.equal(snap1.installed, true);
+  assert.equal(snap1.diskMode, '256k');
+  assert.equal(psCalls, 1, 'Initial darwin snapshot runs ps once');
+  assert.equal(lsofCalls, 1, 'Initial darwin snapshot runs lsof once');
+
+  const snap2 = await env.getContextWindowControlSnapshot(opts);
+  assert.equal(snap2.platform, 'darwin');
+  assert.equal(psCalls, 1, 'Cached darwin probe skips redundant ps spawn');
+  assert.equal(lsofCalls, 1, 'Cached darwin probe skips redundant lsof spawn');
+});

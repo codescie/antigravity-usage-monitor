@@ -35,6 +35,7 @@ import {
   formatAgentLabel,
   formatContextTierLabel,
   getAgentBadgeClass,
+  isMacHostPlatform,
   normalizeClientTopbarSlots,
   normalizeClientUpdateMode,
   resolveScopedConversation,
@@ -54,7 +55,8 @@ import {
 
 const CAPSULE_HOST_ID = 'ag-usage-monitor-capsule';
 const PORTAL_HOST_ID = 'ag-usage-monitor-portal';
-const FLOATING_CARD_WIDTH = 492;
+const POPOVER_CARD_WIDTH = 520;
+const HOVER_CARD_WIDTH = 492;
 const MULTI_PANEL_WIDTH = 484;
 const RING_RADIUS = 5.2;
 const RING_CIRCUMFERENCE = +(2 * Math.PI * RING_RADIUS).toFixed(2);
@@ -1081,6 +1083,8 @@ export function mountWindowOverlay() {
   (document.body || document.documentElement).appendChild(portalHost);
 
   // --- 3. 几何测量、顶栏停靠与防溢出定位 ---
+  const isMac = () => isMacHostPlatform(telemetryStore.getState().telemetry);
+
   function updateFixedFallbackPosition() {
     if (capsuleHost.getAttribute('data-dock') === 'flow') {
       capsuleHost.style.top = '';
@@ -1089,12 +1093,13 @@ export function mountWindowOverlay() {
     }
     try {
       const vw = Number(window.innerWidth || 1280);
-      let rightOffset = 144;
+      const minRight = isMac() ? 12 : 144;
+      let rightOffset = minRight;
       const anchor = findNativeTopRightAnchor();
       if (anchor?.getBoundingClientRect) {
         const r = anchor.getBoundingClientRect();
         if (r.width > 0 && r.left > 0 && r.left < vw) {
-          rightOffset = Math.max(144, Math.ceil(vw - r.left + 6));
+          rightOffset = Math.max(minRight, Math.ceil(vw - r.left + 6));
         }
       }
       capsuleHost.style.top = '7px';
@@ -1111,10 +1116,11 @@ export function mountWindowOverlay() {
         if (tbRect.width > 0) {
           const titleEl = titlebar.firstElementChild;
           const titleInner = titleEl?.firstElementChild;
+          const macTrafficReserve = isMac() ? 80 : 168;
           const contentStart = titleInner?.getBoundingClientRect
             ? Math.max(8, titleInner.getBoundingClientRect().left - tbRect.left)
-            : tbRect.left < 168
-              ? 168 - tbRect.left
+            : tbRect.left < macTrafficReserve
+              ? macTrafficReserve - tbRect.left
               : 12;
           const minTitleWidth = 180;
           let siblingButtonsWidth = 64;
@@ -1168,7 +1174,8 @@ export function mountWindowOverlay() {
       const vh = Number(window.innerHeight || 800);
       const navRight = getLeftSidebarRightEdge(vw);
       const minLeft = navRight > 0 ? Math.max(12, navRight + 12) : 12;
-      const defaultCardW = Math.min(FLOATING_CARD_WIDTH, Math.max(280, vw - 24));
+      const defaultPopoverW = Math.min(POPOVER_CARD_WIDTH, Math.max(280, vw - 24));
+      const defaultHoverW = Math.min(HOVER_CARD_WIDTH, Math.max(280, vw - 24));
       const defaultMultiW = Math.min(MULTI_PANEL_WIDTH, Math.max(280, vw - 24));
 
       if (multiOpen) {
@@ -1204,7 +1211,7 @@ export function mountWindowOverlay() {
         const rawW =
           Number(popoverEl.offsetWidth) ||
           Number(popoverEl.getBoundingClientRect?.().width) ||
-          defaultCardW;
+          defaultPopoverW;
         const panelW = Math.min(rawW, Math.max(280, vw - minLeft - 12));
         const top = Math.max(38, Math.min(vh - 140, Math.round(bRect.bottom + 6)));
         let left = Math.round(rightAnchorEdge - panelW);
@@ -1219,7 +1226,7 @@ export function mountWindowOverlay() {
         const rawW =
           Number(hoverTipEl.offsetWidth) ||
           Number(hoverTipEl.getBoundingClientRect?.().width) ||
-          defaultCardW;
+          defaultHoverW;
         const tipW = Math.min(rawW, Math.max(280, vw - minLeft - 12));
         const tipH =
           Number(hoverTipEl.offsetHeight) ||
@@ -1273,6 +1280,7 @@ export function mountWindowOverlay() {
     if (bodyOrDoc && !portalHost.isConnected) {
       bodyOrDoc.appendChild(portalHost);
     }
+    patchAttr(capsuleHost, 'data-os', isMac() ? 'mac' : 'default');
 
     const titlebar = findHostTitlebar();
     if (titlebar) {
@@ -1621,6 +1629,7 @@ export function mountWindowOverlay() {
     const telemetry = telSt.telemetry;
 
     const showMulti = telemetry?.settings?.showTopbarMultiSession !== false;
+    patchAttr(capsuleHost, 'data-os', isMacHostPlatform(telemetry) ? 'mac' : 'default');
     patchAttr(multiBtn, 'hidden', !showMulti);
     patchAttr(capsuleHost, 'data-multi', showMulti ? 'on' : 'off');
     if (!showMulti && multiOpen) {
@@ -2038,7 +2047,8 @@ export function mountWindowOverlay() {
     if (showHoverTier) {
       const tierLabel = formatContextTierLabel(ctxCtrl.mode);
       const pendingRestart = Boolean(ctxCtrl.needsRestart);
-      patchText(hoverCtxTierBadge, pendingRestart ? `${tierLabel} · 待重启` : tierLabel);
+      const macRestartSuffix = isMacHostPlatform(telemetry) ? '待退出重开' : '待重启';
+      patchText(hoverCtxTierBadge, pendingRestart ? `${tierLabel} · ${macRestartSuffix}` : tierLabel);
       patchAttr(
         hoverCtxTierBadge,
         'class',

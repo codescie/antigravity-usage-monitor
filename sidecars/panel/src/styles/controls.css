@@ -58,6 +58,8 @@
   padding: 2px 6px;
   font-size: 11px;
   font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
   border-radius: var(--radius-xs);
   border: 1px solid color-mix(in srgb, var(--metric-ok) 32%, var(--border-hairline));
   background: var(--metric-ok-soft);
@@ -656,7 +658,30 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: var(--space-2);
+}
+
+.panel-feedback {
+  font-size: 11px;
+  min-width: 0;
+  max-width: 58%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.detector-verdict-meta {
+  min-width: 0;
+  max-width: 64%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.detector-mode-row {
+  flex-wrap: wrap;
+  row-gap: 4px;
 }
 
 .update-badge-btn {
@@ -1121,4 +1146,29 @@
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
+}
+
+@container top-deck (max-width: 420px) {
+  .pill-tab {
+    gap: 3.5px;
+    padding: 0 4px;
+    font-size: 11.5px;
+  }
+  .pill-tab-badge {
+    font-size: 11px;
+  }
+}
+
+@container top-deck (max-width: 372px) {
+  .pill-tab .svg-icon {
+    display: none;
+  }
+  .session-header {
+    padding: 4px 8px;
+    gap: 4px;
+  }
+  .update-badge-btn {
+    padding: 0 5px;
+    font-size: 10.5px;
+  }
 }
