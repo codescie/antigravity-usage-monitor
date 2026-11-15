@@ -1136,6 +1136,7 @@ export const LiveOverviewView = defineComponent({
         patchClasses(healthAlertPanel, { 'is-critical': rawAlert.level === 'critical' });
         patchText(healthBadgeEl, rawAlert.badge || '异常预警');
         patchText(healthTitleEl, rawAlert.title || '推理异常预警');
+        patchAttr(healthTitleEl, 'title', rawAlert.title || '');
         patchText(healthScoreEl, `健康 ${rawAlert.score ?? '--'}`);
         patchText(healthSummaryEl, rawAlert.summary || '');
         const reasons = Array.isArray(rawAlert.reasons) ? rawAlert.reasons : [];

@@ -81,8 +81,9 @@
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
-  flex: 1 1 280px;
+  flex-wrap: wrap;
+  gap: 5px;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -91,9 +92,9 @@
 }
 
 .steps-inline-scope-select {
-  flex: 0 1 180px;
+  flex: 0 1 150px;
   min-width: 72px;
-  max-width: 190px;
+  max-width: 170px;
 }
 
 .steps-inline-scope-select .select-trigger {
@@ -107,29 +108,59 @@
   background: var(--surface-subtle);
 }
 
+@container view-pane (max-width: 430px) {
+  .steps-header-controls {
+    flex-basis: 100%;
+    justify-content: space-between;
+  }
+}
+
 /* --- 3. 极简对话轮次导轨与起点圆点 (Minimalist Turn Rail & Origin Dot) --- */
 .steps-data-table th,
 .steps-data-table td {
-  padding: 5px 3.5px;
+  padding: 5px 3px;
 }
 
 .steps-data-table th.step-col-head,
 .steps-data-table td.step-cell {
-  padding-left: 17px;
+  padding-left: 15px;
 }
 
 .steps-data-table td.step-cell {
   position: relative;
 }
 
+.steps-data-table .col-cost {
+  text-align: right;
+  padding-right: 10px;
+}
+
 .steps-data-table td.model-cell {
-  max-width: 118px;
+  width: 99%;
+  max-width: 0;
+  min-width: 72px;
   overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .steps-data-table.has-subagents td.model-cell {
-  max-width: 96px;
+  min-width: 64px;
+}
+
+.model-cell-inner {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.model-cell-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .steps-data-table .dur-main {
@@ -143,7 +174,16 @@
   line-height: 1.2;
 }
 
-@container steps-table (max-width: 456px) {
+@container steps-table (max-width: 496px) {
+  .steps-data-table.has-subagents .col-ttft {
+    display: none;
+  }
+  .steps-data-table.has-subagents .dur-sub-ttft:not([hidden]) {
+    display: block;
+  }
+}
+
+@container steps-table (max-width: 462px) {
   .steps-data-table .col-ttft {
     display: none;
   }
@@ -152,18 +192,24 @@
   }
   .steps-data-table th,
   .steps-data-table td {
-    padding: 5px 3px;
+    padding: 5px 2.5px;
   }
   .steps-data-table td.model-cell {
-    max-width: 88px;
+    min-width: 64px;
   }
   .steps-data-table.has-subagents td.model-cell {
-    max-width: 74px;
+    min-width: 56px;
   }
 }
 
-@container steps-table (max-width: 392px) {
+@container steps-table (max-width: 412px) {
   .steps-data-table .col-cache {
+    display: none;
+  }
+}
+
+@container steps-table (max-width: 358px) {
+  .steps-data-table .col-ctx {
     display: none;
   }
 }
@@ -233,8 +279,26 @@
   box-shadow: 0 0 0 1px var(--surface-panel);
 }
 
+.turn-rail-dot.is-origin.is-warn {
+  border-color: var(--metric-warn);
+}
+
+.turn-rail-dot.is-origin.is-critical {
+  border-color: var(--metric-danger);
+}
+
 .turn-rail.is-latest .turn-rail-dot.is-origin {
   background: var(--rail-dot);
+}
+
+.turn-rail.is-latest .turn-rail-dot.is-origin.is-warn {
+  background: var(--metric-warn);
+  border-color: var(--metric-warn);
+}
+
+.turn-rail.is-latest .turn-rail-dot.is-origin.is-critical {
+  background: var(--metric-danger);
+  border-color: var(--metric-danger);
 }
 
 /* 交互式提问与健康归因气泡 */
@@ -353,14 +417,14 @@
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  height: 20px;
-  padding: 0 6px;
+  height: 22px;
+  padding: 0 7px;
   margin-left: 4px;
-  border-radius: var(--radius-pill);
+  border-radius: var(--radius-xs);
   border: 1px solid color-mix(in srgb, var(--metric-warn) 38%, var(--border-hairline));
   background: var(--metric-warn-soft);
   color: var(--metric-warn);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -371,10 +435,21 @@
   color: var(--text-inverse);
 }
 
+.step-num-text.is-warn {
+  color: var(--metric-warn);
+  font-weight: 600;
+}
+
+.step-num-text.is-critical {
+  color: var(--metric-danger);
+  font-weight: 600;
+}
+
 .step-health-tag {
   display: inline-flex;
   align-items: center;
-  margin-left: 4px;
+  flex-shrink: 0;
+  margin-left: 0;
   padding: 0 4px;
   height: 15px;
   border-radius: var(--radius-xs);
@@ -395,21 +470,11 @@
   font-weight: 600;
 }
 
-.turn-rail.tone-warn {
-  --rail-line: color-mix(in srgb, var(--metric-warn) 68%, var(--border-hairline));
-  --rail-dot: var(--metric-warn);
-}
-
-.turn-rail.tone-critical {
-  --rail-line: color-mix(in srgb, var(--metric-danger) 72%, var(--border-hairline));
-  --rail-dot: var(--metric-danger);
-}
-
 .turn-rail-dot.is-anomaly-dot {
-  width: 5px;
-  height: 5px;
+  width: 5.5px;
+  height: 5.5px;
   background: var(--metric-warn);
-  box-shadow: 0 0 0 1px var(--surface-panel);
+  box-shadow: 0 0 0 1.5px var(--surface-panel);
 }
 
 .turn-rail-dot.is-anomaly-dot.is-critical {

@@ -230,9 +230,11 @@ export const StepsDetailView = defineComponent({
           const placeAbove =
             panelRect.bottom - cellRect.bottom < tipH + 12 &&
             cellRect.top - panelRect.top > tipH + 6;
-          const topPx = placeAbove
-            ? Math.max(4, Math.round(cellRect.top - panelRect.top - tipH - 4))
+          const rawTopPx = placeAbove
+            ? Math.round(cellRect.top - panelRect.top - tipH - 4)
             : Math.round(cellRect.bottom - panelRect.top + 4);
+          const maxTopPx = Math.max(4, Math.round(panelRect.height - tipH - 6));
+          const topPx = Math.min(Math.max(4, rawTopPx), maxTopPx);
           const leftPx = Math.max(6, Math.round(cellRect.left - panelRect.left + 4));
           turnTipEl.style.top = `${topPx}px`;
           turnTipEl.style.left = `${leftPx}px`;
@@ -426,7 +428,7 @@ export const StepsDetailView = defineComponent({
               ? `异常步骤 (${steps.length}/${rawSteps.length})`
               : `按步查看 (${rawSteps.length})`,
           },
-          { value: 'models', label: `按模型汇总 (${modelsTabBadge})` },
+          { value: 'models', label: '按模型汇总' },
         ],
       });
 
@@ -494,18 +496,22 @@ export const StepsDetailView = defineComponent({
           const agentBadgeEl = h('span', {
             className: 'agent-badge is-clickable',
             hidden: true,
-            style: 'margin-right: 4px;',
+            style: 'margin-right: 3px;',
           });
-          const stepNumText = h('span');
-          const stepHealthTagEl = h('span', { className: 'step-health-tag', hidden: true });
+          const stepNumText = h('span', { className: 'step-num-text' });
           const tdStep = h('td', { className: 'step-cell' }, [
             railEl,
             agentBadgeEl,
             stepNumText,
-            stepHealthTagEl,
           ]);
 
-          const tdModel = h('td', { className: 'col-model model-cell' });
+          const stepHealthTagEl = h('span', { className: 'step-health-tag', hidden: true });
+          const modelNameEl = h('span', { className: 'model-cell-name' });
+          const modelInnerEl = h('div', { className: 'model-cell-inner' }, [
+            stepHealthTagEl,
+            modelNameEl,
+          ]);
+          const tdModel = h('td', { className: 'col-model model-cell' }, [modelInnerEl]);
           const speedMain = h('strong', {
             className: 'cell-value accent-speed',
             style: 'font-size: 11px;',
@@ -537,6 +543,7 @@ export const StepsDetailView = defineComponent({
               stepNumText,
               stepHealthTagEl,
               tdModel,
+              modelNameEl,
               speedMain,
               speedReason,
               tdTtft,
@@ -558,10 +565,8 @@ export const StepsDetailView = defineComponent({
             'is-row-critical': st.stepHealthLevel === 'critical',
           });
 
-          const stepAnomalyDot =
-            !isStart &&
-            (hasUp || !hasDown) &&
-            (st.stepHealthLevel === 'warn' || st.stepHealthLevel === 'critical');
+          const isStepAnom = st.stepHealthLevel === 'warn' || st.stepHealthLevel === 'critical';
+          const stepAnomalyDot = !isStart && isStepAnom;
 
           patchAttr(refs.railEl, 'hidden', !hasTurn);
           if (hasTurn) {
@@ -569,19 +574,24 @@ export const StepsDetailView = defineComponent({
               'is-latest': isLatest,
               'has-up': hasUp,
               'has-down': hasDown,
-              'tone-warn': turnLevel === 'warn',
-              'tone-critical': turnLevel === 'critical',
             });
             patchAttr(refs.railLineEl, 'hidden', !hasUp && !hasDown);
             const showOrigin = isStart;
             const showCap = !showOrigin && !hasUp && hasDown && !stepAnomalyDot;
+            const dotCrit =
+              (stepAnomalyDot && st.stepHealthLevel === 'critical') ||
+              (showOrigin && (st.stepHealthLevel === 'critical' || turnLevel === 'critical'));
+            const dotWarn =
+              !dotCrit &&
+              ((stepAnomalyDot && st.stepHealthLevel === 'warn') ||
+                (showOrigin && (st.stepHealthLevel === 'warn' || turnLevel === 'warn')));
             patchAttr(refs.railDotEl, 'hidden', !showOrigin && !showCap && !stepAnomalyDot);
             patchClasses(refs.railDotEl, {
               'is-origin': showOrigin,
               'is-cap': showCap,
               'is-anomaly-dot': stepAnomalyDot,
-              'is-warn': st.stepHealthLevel === 'warn',
-              'is-critical': st.stepHealthLevel === 'critical',
+              'is-warn': dotWarn,
+              'is-critical': dotCrit,
             });
           }
 
@@ -616,6 +626,10 @@ export const StepsDetailView = defineComponent({
             };
           }
           patchText(refs.stepNumText, `#${Number(st.stepIndex)}`);
+          patchClasses(refs.stepNumText, {
+            'is-warn': st.stepHealthLevel === 'warn',
+            'is-critical': st.stepHealthLevel === 'critical',
+          });
           const showBadgeTag =
             Boolean(st.stepHealthBadge) &&
             (st.stepHealthLevel === 'warn' || st.stepHealthLevel === 'critical');
@@ -628,8 +642,21 @@ export const StepsDetailView = defineComponent({
           }
 
           const modelDisplay = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
-          patchText(refs.tdModel, modelDisplay.text);
-          patchAttr(refs.tdModel, 'title', modelDisplay.title);
+          patchText(refs.modelNameEl, modelDisplay.text);
+          patchAttr(
+            refs.tdModel,
+            'title',
+            st.stepHealthDetail
+              ? `${modelDisplay.title} · ${st.stepHealthDetail}`
+              : modelDisplay.title
+          );
+          if (showBadgeTag) {
+            refs.tdModel.onmouseenter = () => showTurnTip(refs.tdStep, item);
+            refs.tdModel.onmouseleave = scheduleHideTurnTip;
+          } else {
+            refs.tdModel.onmouseenter = null;
+            refs.tdModel.onmouseleave = null;
+          }
 
           patchText(refs.speedMain, formatMetric(st.tokPerSec, ' tok/s'));
           const reason = speedReasonText(st.selectedSpeedReason);
@@ -642,7 +669,9 @@ export const StepsDetailView = defineComponent({
           patchText(refs.durSubTtft, subTtft);
           patchAttr(refs.durSubTtft, 'hidden', !subTtft);
           patchAttr(refs.tdDur, 'title', formatStepDurationDetail(st));
-          const ctxStr = `${formatTokens(st.contextTokens)} / +${Number(st.outputTokens || 0)}`;
+          const outNum = Number(st.outputTokens || 0);
+          const outCompact = outNum >= 10000 ? formatTokens(outNum) : String(outNum);
+          const ctxStr = `${formatTokens(st.contextTokens)}/+${outCompact}`;
           patchText(refs.tdCtx, ctxStr);
           patchAttr(
             refs.tdCtx,

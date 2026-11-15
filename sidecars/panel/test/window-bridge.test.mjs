@@ -1483,7 +1483,7 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
             totalDurationSec: 12,
             isComplete: true,
             contextTokens: 264000,
-            outputTokens: 400,
+            outputTokens: 13938,
             cacheHitPct: 98.5,
             costUsd: 0.04,
             isCacheAnomaly: false,
@@ -1534,7 +1534,14 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     const stepsBody2 = popoverEl.querySelector('.steps-data-table').children[1];
     assert.equal(stepsBody2.children.length, 2, 'Jump switches to StepsDetailView with both steps');
     assert.equal(stepsBody2.children[0].classList.contains('is-step-flash'), true, 'Target step row #5 flashes on jump');
-    assert.equal(stepsBody2.children[0].querySelector('.step-health-tag').textContent, '切流');
+    assert.equal(stepsBody2.children[0].querySelector('.step-cell').querySelector('.step-health-tag'), null, 'Step health badge moved out of step-cell');
+    assert.equal(stepsBody2.children[0].querySelector('.col-model').querySelector('.step-health-tag').textContent, '切流');
+    assert.equal(stepsBody2.children[0].querySelector('.col-model').querySelector('.model-cell-name').textContent, 'gemini-4-carbon');
+    assert.equal(stepsBody2.children[0].querySelector('.col-ctx').textContent, '274.0k/+6200');
+    assert.equal(stepsBody2.children[1].querySelector('.col-ctx').textContent, '264.0k/+13.9k');
+    assert.match(stylesCss, /\.steps-data-table\s+td\.model-cell[\s\S]*?max-width:\s*0/, 'Compiled styles.css guards model-cell width squeeze');
+    assert.match(stylesCss, /\.steps-data-table\s+\.col-cost[\s\S]*?padding-right:\s*10px/, 'Compiled styles.css preserves 10px right padding on col-cost');
+    assert.equal(stylesCss.includes('.turn-rail.tone-warn'), false, 'Compiled styles.css drops full-turn orange rail painting');
 
     const anomalyFilterBtn = popoverEl.querySelector('.steps-anomaly-filter-btn');
     assert.ok(anomalyFilterBtn && !anomalyFilterBtn.hasAttribute('hidden'));
