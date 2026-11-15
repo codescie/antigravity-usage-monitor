@@ -1,7 +1,9 @@
 /**
  * @fileoverview Pure formatting utilities for speed metrics, token counts,
- * USD estimates, countdown timers, and custom datetime displays.
+ * USD estimates, countdown timers, adaptive TTFT baselines, and custom datetime displays.
  */
+
+import { callSidecarApi } from './httpClient.js';
 
 export function formatMetric(value, unit = '') {
   return Number.isFinite(value) ? `${value.toFixed(1)}${unit}` : '—';
@@ -238,7 +240,10 @@ export function resolveModelDisplayInfo(target, settings = {}, options = {}) {
 }
 
 /**
- * 将指令文本安全复制到系统剪贴板（优先 `navigator.clipboard.writeText`，回退至临时 `<textarea>` 选区复制）。
+ * 将指令文本安全复制到系统剪贴板：
+ * 1. 优先在 await 前同步触发临时 `<textarea>` 选区 `execCommand('copy')`，保留 Webview 用户激活态；
+ * 2. 回退至异步 `navigator.clipboard.writeText`；
+ * 3. 若宿主沙箱拦截前端剪贴板权限，通过本地 Sidecar `/api/clipboard` 写入系统剪贴板。
  *
  * @param {string} text
  * @returns {Promise<boolean>}
@@ -249,35 +254,68 @@ export async function copyTextToClipboard(text) {
   if (typeof window !== 'undefined') {
     window.__AGLastCopiedText = str;
   }
-  if (typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
-    try {
-      await navigator.clipboard.writeText(str);
-      return true;
-    } catch {
-      // 受权限限制时自动回退至 DOM execCommand
-    }
-  }
-  if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
+
+  let syncCopied = false;
+  if (
+    typeof document !== 'undefined' &&
+    typeof document.createElement === 'function' &&
+    typeof document.execCommand === 'function' &&
+    document.body?.appendChild
+  ) {
     let ta = null;
+    const prevActive = document.activeElement;
     try {
       ta = document.createElement('textarea');
       ta.value = str;
+      ta.setAttribute?.('readonly', '');
       if (ta.style) {
         ta.style.position = 'fixed';
+        ta.style.top = '0';
         ta.style.left = '-9999px';
         ta.style.opacity = '0';
+        ta.style.pointerEvents = 'none';
       }
-      document.body?.appendChild?.(ta);
+      document.body.appendChild(ta);
+      ta.focus?.({ preventScroll: true });
       ta.select?.();
-      const copied = typeof document.execCommand === 'function' ? document.execCommand('copy') : false;
-      return Boolean(copied || (typeof window !== 'undefined' && window.__AGLastCopiedText === str));
+      ta.setSelectionRange?.(0, str.length);
+      syncCopied = Boolean(document.execCommand('copy'));
     } catch {
-      return typeof window !== 'undefined' && window.__AGLastCopiedText === str;
+      syncCopied = false;
     } finally {
       ta?.remove?.();
+      try {
+        prevActive?.focus?.({ preventScroll: true });
+      } catch {
+        // ignore focus restore failure
+      }
     }
   }
-  return typeof window !== 'undefined' && window.__AGLastCopiedText === str;
+
+  let asyncCopied = false;
+  if (typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(str);
+      asyncCopied = true;
+    } catch {
+      asyncCopied = false;
+    }
+  }
+
+  if (syncCopied || asyncCopied) {
+    return true;
+  }
+
+  try {
+    const res = await callSidecarApi('/api/clipboard', {
+      method: 'POST',
+      body: { text: str },
+    });
+    if (res?.ok) return true;
+  } catch {
+    // ignore fallback failure
+  }
+  return false;
 }
 
 /**
@@ -298,4 +336,123 @@ export async function copyWithTimedFeedback(text, timerHolder, onToggle, duratio
     }, durationMs);
   }
   return true;
+}
+
+/**
+ * 提取步骤用于首字延迟 (TTFT) 基线分桶的模型规范键。
+ *
+ * @param {object|null|undefined} st
+ * @returns {string}
+ */
+export function resolveStepTtftModelBucket(st) {
+  const raw = String(
+    st?.responseModel || st?.modelUpstream || st?.modelShort || st?.modelKey || 'unknown'
+  )
+    .replace(/·压缩|\[自动压缩\]/g, '')
+    .trim()
+    .toLowerCase();
+  return raw || 'unknown';
+}
+
+/**
+ * 按模型级别与推理深度特征推导合理的 TTFT 先验阈值（快响应 / 标准 / 旗舰深度思考）。
+ *
+ * @param {object|null|undefined} st
+ * @returns {{ tier: 'fast'|'standard'|'deep', warnFloor: number, stallFloor: number, prefillPer100k: number }}
+ */
+export function resolveModelTtftPriors(st) {
+  const sig = `${st?.modelKey || ''} ${st?.responseModel || ''} ${st?.modelUpstream || ''} ${st?.modelShort || ''} ${st?.modelLabel || ''}`.toLowerCase();
+  if (
+    /\b(?:flash|lite|haiku|hydrogen|mini)\b|worker-agy/.test(sig) &&
+    !/thinking|carbon|opus/.test(sig)
+  ) {
+    return { tier: 'fast', warnFloor: 5.0, stallFloor: 10.0, prefillPer100k: 1.2 };
+  }
+  if (/\b(?:carbon|orchestrator|opus|thinking|xhigh|high|o1|o3|o4|gpt-5)\b/.test(sig)) {
+    return { tier: 'deep', warnFloor: 18.0, stallFloor: 36.0, prefillPer100k: 3.0 };
+  }
+  return { tier: 'standard', warnFloor: 9.0, stallFloor: 18.0, prefillPer100k: 2.0 };
+}
+
+/**
+ * 从当前会话步骤列表按同模型统计首字延迟（TTFT）实测中位数基线（至少 3 条已完成样本）。
+ *
+ * @param {object[]} [steps=[]]
+ * @returns {Map<string, { count: number, medianSec: number }>}
+ */
+export function buildModelTtftBaselines(steps = []) {
+  const byBucket = new Map();
+  for (const s of steps || []) {
+    if (!s || s.isCompactionStep || s.isComplete === false) continue;
+    const v = Number(s.ttftSec);
+    if (!Number.isFinite(v) || v < 0) continue;
+    const bucket = resolveStepTtftModelBucket(s);
+    let arr = byBucket.get(bucket);
+    if (!arr) {
+      arr = [];
+      byBucket.set(bucket, arr);
+    }
+    arr.push(v);
+  }
+  const baselines = new Map();
+  for (const [bucket, vals] of byBucket.entries()) {
+    if (vals.length < 3) continue;
+    const sorted = vals.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const medianSec =
+      sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    baselines.set(bucket, { count: sorted.length, medianSec });
+  }
+  return baselines;
+}
+
+/**
+ * 结合模型先验分级、未缓存 Pre-fill 体量、缓冲思考耗时与本会话同模型实测中位数，
+ * 判定单步 TTFT 是否真正偏慢或卡顿，避免误标旗舰思考模型的正常首字耗时。
+ *
+ * @param {object|null|undefined} st
+ * @param {Map<string, { count: number, medianSec: number }>|null} [baselinesMap=null]
+ */
+export function classifyStepTtft(st, baselinesMap = null) {
+  const ttftNum = Number(st?.ttftSec);
+  if (!Number.isFinite(ttftNum) || ttftNum < 0) {
+    return {
+      hasTtft: false,
+      ttftNum: null,
+      isSlow: false,
+      isStall: false,
+      medianSec: null,
+      warnAt: null,
+      stallAt: null,
+    };
+  }
+  const priors = resolveModelTtftPriors(st);
+  const base = baselinesMap?.get(resolveStepTtftModelBucket(st)) || null;
+  const thinkDur = Number(st?.thinkingDurationSec);
+  const effectiveTtft =
+    Number.isFinite(thinkDur) && thinkDur > 1 && ttftNum >= thinkDur * 0.9
+      ? Math.max(0, ttftNum - thinkDur * 0.85)
+      : ttftNum;
+  const fresh100k = Math.max(0, Number(st?.inputTokens || 0)) / 100000;
+  const prefillAdd = fresh100k * priors.prefillPer100k;
+  const medianSec = base?.medianSec ?? null;
+  const warnAt = Math.max(
+    priors.warnFloor + prefillAdd,
+    medianSec !== null ? medianSec * 2.0 : 0
+  );
+  const stallAt = Math.max(
+    priors.stallFloor + prefillAdd * 1.5,
+    medianSec !== null ? medianSec * 3.2 : 0
+  );
+  const isStall = effectiveTtft >= stallAt;
+  const isSlow = !isStall && effectiveTtft >= warnAt;
+  return {
+    hasTtft: true,
+    ttftNum,
+    isSlow,
+    isStall,
+    medianSec,
+    warnAt,
+    stallAt,
+  };
 }

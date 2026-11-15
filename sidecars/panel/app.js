@@ -547,8 +547,9 @@ function defineComponent({ name, setup }) {
 // --- src/core/formatters.js ---
 /**
  * @fileoverview Pure formatting utilities for speed metrics, token counts,
- * USD estimates, countdown timers, and custom datetime displays.
+ * USD estimates, countdown timers, adaptive TTFT baselines, and custom datetime displays.
  */
+
 
 function formatMetric(value, unit = '') {
   return Number.isFinite(value) ? `${value.toFixed(1)}${unit}` : '—';
@@ -785,7 +786,10 @@ function resolveModelDisplayInfo(target, settings = {}, options = {}) {
 }
 
 /**
- * 将指令文本安全复制到系统剪贴板（优先 `navigator.clipboard.writeText`，回退至临时 `<textarea>` 选区复制）。
+ * 将指令文本安全复制到系统剪贴板：
+ * 1. 优先在 await 前同步触发临时 `<textarea>` 选区 `execCommand('copy')`，保留 Webview 用户激活态；
+ * 2. 回退至异步 `navigator.clipboard.writeText`；
+ * 3. 若宿主沙箱拦截前端剪贴板权限，通过本地 Sidecar `/api/clipboard` 写入系统剪贴板。
  *
  * @param {string} text
  * @returns {Promise<boolean>}
@@ -796,35 +800,68 @@ async function copyTextToClipboard(text) {
   if (typeof window !== 'undefined') {
     window.__AGLastCopiedText = str;
   }
-  if (typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
-    try {
-      await navigator.clipboard.writeText(str);
-      return true;
-    } catch {
-      // 受权限限制时自动回退至 DOM execCommand
-    }
-  }
-  if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
+
+  let syncCopied = false;
+  if (
+    typeof document !== 'undefined' &&
+    typeof document.createElement === 'function' &&
+    typeof document.execCommand === 'function' &&
+    document.body?.appendChild
+  ) {
     let ta = null;
+    const prevActive = document.activeElement;
     try {
       ta = document.createElement('textarea');
       ta.value = str;
+      ta.setAttribute?.('readonly', '');
       if (ta.style) {
         ta.style.position = 'fixed';
+        ta.style.top = '0';
         ta.style.left = '-9999px';
         ta.style.opacity = '0';
+        ta.style.pointerEvents = 'none';
       }
-      document.body?.appendChild?.(ta);
+      document.body.appendChild(ta);
+      ta.focus?.({ preventScroll: true });
       ta.select?.();
-      const copied = typeof document.execCommand === 'function' ? document.execCommand('copy') : false;
-      return Boolean(copied || (typeof window !== 'undefined' && window.__AGLastCopiedText === str));
+      ta.setSelectionRange?.(0, str.length);
+      syncCopied = Boolean(document.execCommand('copy'));
     } catch {
-      return typeof window !== 'undefined' && window.__AGLastCopiedText === str;
+      syncCopied = false;
     } finally {
       ta?.remove?.();
+      try {
+        prevActive?.focus?.({ preventScroll: true });
+      } catch {
+        // ignore focus restore failure
+      }
     }
   }
-  return typeof window !== 'undefined' && window.__AGLastCopiedText === str;
+
+  let asyncCopied = false;
+  if (typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(str);
+      asyncCopied = true;
+    } catch {
+      asyncCopied = false;
+    }
+  }
+
+  if (syncCopied || asyncCopied) {
+    return true;
+  }
+
+  try {
+    const res = await callSidecarApi('/api/clipboard', {
+      method: 'POST',
+      body: { text: str },
+    });
+    if (res?.ok) return true;
+  } catch {
+    // ignore fallback failure
+  }
+  return false;
 }
 
 /**
@@ -845,6 +882,125 @@ async function copyWithTimedFeedback(text, timerHolder, onToggle, durationMs = 1
     }, durationMs);
   }
   return true;
+}
+
+/**
+ * 提取步骤用于首字延迟 (TTFT) 基线分桶的模型规范键。
+ *
+ * @param {object|null|undefined} st
+ * @returns {string}
+ */
+function resolveStepTtftModelBucket(st) {
+  const raw = String(
+    st?.responseModel || st?.modelUpstream || st?.modelShort || st?.modelKey || 'unknown'
+  )
+    .replace(/·压缩|\[自动压缩\]/g, '')
+    .trim()
+    .toLowerCase();
+  return raw || 'unknown';
+}
+
+/**
+ * 按模型级别与推理深度特征推导合理的 TTFT 先验阈值（快响应 / 标准 / 旗舰深度思考）。
+ *
+ * @param {object|null|undefined} st
+ * @returns {{ tier: 'fast'|'standard'|'deep', warnFloor: number, stallFloor: number, prefillPer100k: number }}
+ */
+function resolveModelTtftPriors(st) {
+  const sig = `${st?.modelKey || ''} ${st?.responseModel || ''} ${st?.modelUpstream || ''} ${st?.modelShort || ''} ${st?.modelLabel || ''}`.toLowerCase();
+  if (
+    /\b(?:flash|lite|haiku|hydrogen|mini)\b|worker-agy/.test(sig) &&
+    !/thinking|carbon|opus/.test(sig)
+  ) {
+    return { tier: 'fast', warnFloor: 5.0, stallFloor: 10.0, prefillPer100k: 1.2 };
+  }
+  if (/\b(?:carbon|orchestrator|opus|thinking|xhigh|high|o1|o3|o4|gpt-5)\b/.test(sig)) {
+    return { tier: 'deep', warnFloor: 18.0, stallFloor: 36.0, prefillPer100k: 3.0 };
+  }
+  return { tier: 'standard', warnFloor: 9.0, stallFloor: 18.0, prefillPer100k: 2.0 };
+}
+
+/**
+ * 从当前会话步骤列表按同模型统计首字延迟（TTFT）实测中位数基线（至少 3 条已完成样本）。
+ *
+ * @param {object[]} [steps=[]]
+ * @returns {Map<string, { count: number, medianSec: number }>}
+ */
+function buildModelTtftBaselines(steps = []) {
+  const byBucket = new Map();
+  for (const s of steps || []) {
+    if (!s || s.isCompactionStep || s.isComplete === false) continue;
+    const v = Number(s.ttftSec);
+    if (!Number.isFinite(v) || v < 0) continue;
+    const bucket = resolveStepTtftModelBucket(s);
+    let arr = byBucket.get(bucket);
+    if (!arr) {
+      arr = [];
+      byBucket.set(bucket, arr);
+    }
+    arr.push(v);
+  }
+  const baselines = new Map();
+  for (const [bucket, vals] of byBucket.entries()) {
+    if (vals.length < 3) continue;
+    const sorted = vals.slice().sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const medianSec =
+      sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    baselines.set(bucket, { count: sorted.length, medianSec });
+  }
+  return baselines;
+}
+
+/**
+ * 结合模型先验分级、未缓存 Pre-fill 体量、缓冲思考耗时与本会话同模型实测中位数，
+ * 判定单步 TTFT 是否真正偏慢或卡顿，避免误标旗舰思考模型的正常首字耗时。
+ *
+ * @param {object|null|undefined} st
+ * @param {Map<string, { count: number, medianSec: number }>|null} [baselinesMap=null]
+ */
+function classifyStepTtft(st, baselinesMap = null) {
+  const ttftNum = Number(st?.ttftSec);
+  if (!Number.isFinite(ttftNum) || ttftNum < 0) {
+    return {
+      hasTtft: false,
+      ttftNum: null,
+      isSlow: false,
+      isStall: false,
+      medianSec: null,
+      warnAt: null,
+      stallAt: null,
+    };
+  }
+  const priors = resolveModelTtftPriors(st);
+  const base = baselinesMap?.get(resolveStepTtftModelBucket(st)) || null;
+  const thinkDur = Number(st?.thinkingDurationSec);
+  const effectiveTtft =
+    Number.isFinite(thinkDur) && thinkDur > 1 && ttftNum >= thinkDur * 0.9
+      ? Math.max(0, ttftNum - thinkDur * 0.85)
+      : ttftNum;
+  const fresh100k = Math.max(0, Number(st?.inputTokens || 0)) / 100000;
+  const prefillAdd = fresh100k * priors.prefillPer100k;
+  const medianSec = base?.medianSec ?? null;
+  const warnAt = Math.max(
+    priors.warnFloor + prefillAdd,
+    medianSec !== null ? medianSec * 2.0 : 0
+  );
+  const stallAt = Math.max(
+    priors.stallFloor + prefillAdd * 1.5,
+    medianSec !== null ? medianSec * 3.2 : 0
+  );
+  const isStall = effectiveTtft >= stallAt;
+  const isSlow = !isStall && effectiveTtft >= warnAt;
+  return {
+    hasTtft: true,
+    ttftNum,
+    isSlow,
+    isStall,
+    medianSec,
+    warnAt,
+    stallAt,
+  };
 }
 
 // --- src/core/httpClient.js ---
@@ -6134,10 +6290,14 @@ const StepsDetailView = defineComponent({
     );
 
     let tipHideTimer = null;
+    let tipSwitchTimer = null;
     const tipCopyTimer = { id: null };
     let flashRowTimer = null;
     let lastHandledTargetSeq = 0;
     let lastObservedCascadeId = '';
+    let isPointerInsideTip = false;
+    let currentTipRowKey = '';
+    let pinnedTipRowKey = '';
 
     const cancelHideTurnTip = () => {
       if (tipHideTimer) {
@@ -6145,20 +6305,71 @@ const StepsDetailView = defineComponent({
         tipHideTimer = null;
       }
     };
-    const hideTurnTip = () => {
+    const cancelSwitchTurnTip = () => {
+      if (tipSwitchTimer) {
+        clearTimeout(tipSwitchTimer);
+        tipSwitchTimer = null;
+      }
+    };
+    const hideTurnTip = (force = false) => {
+      if (!force && (isPointerInsideTip || pinnedTipRowKey)) return;
       cancelHideTurnTip();
+      cancelSwitchTurnTip();
+      currentTipRowKey = '';
+      pinnedTipRowKey = '';
+      isPointerInsideTip = false;
       patchAttr(turnTipEl, 'hidden', true);
     };
     const scheduleHideTurnTip = () => {
       cancelHideTurnTip();
       tipHideTimer = setTimeout(() => {
         tipHideTimer = null;
-        patchAttr(turnTipEl, 'hidden', true);
-      }, 110);
+        if (!isPointerInsideTip && !pinnedTipRowKey) {
+          hideTurnTip(true);
+        }
+      }, 260);
     };
 
-    turnTipEl.onmouseenter = cancelHideTurnTip;
-    turnTipEl.onmouseleave = scheduleHideTurnTip;
+    turnTipEl.onmouseenter = () => {
+      isPointerInsideTip = true;
+      cancelHideTurnTip();
+      cancelSwitchTurnTip();
+    };
+    turnTipEl.onmouseleave = () => {
+      isPointerInsideTip = false;
+      if (!pinnedTipRowKey) {
+        scheduleHideTurnTip();
+      }
+    };
+
+    function requestShowTurnTip(anchorCell, item, { pin = false } = {}) {
+      cancelHideTurnTip();
+      cancelSwitchTurnTip();
+      if (!item) return;
+      if (pin) {
+        const tipVisible = !turnTipEl.hasAttribute('hidden');
+        if (pinnedTipRowKey === item.rowKey && tipVisible) {
+          pinnedTipRowKey = '';
+          hideTurnTip(true);
+          return;
+        }
+        pinnedTipRowKey = item.rowKey;
+        showTurnTip(anchorCell, item);
+        return;
+      }
+      if (pinnedTipRowKey) return;
+      const tipVisible = !turnTipEl.hasAttribute('hidden');
+      if (tipVisible && currentTipRowKey && currentTipRowKey !== item.rowKey) {
+        tipSwitchTimer = setTimeout(() => {
+          tipSwitchTimer = null;
+          if (!isPointerInsideTip && !pinnedTipRowKey) {
+            showTurnTip(anchorCell, item);
+          }
+        }, 150);
+        return;
+      }
+      showTurnTip(anchorCell, item);
+    }
 
     function showTurnTip(anchorCell, item) {
       cancelHideTurnTip();
@@ -6175,7 +6386,7 @@ const StepsDetailView = defineComponent({
         st.stepHealthDetail || (isAnomalousTurn && diag.reasons?.join(' · ')) || '';
 
       if (!anchorCell || (!promptText && !isAnomalousStep && !isAnomalousTurn && !reasonText)) {
-        hideTurnTip();
+        hideTurnTip(true);
         return;
       }
 
@@ -6197,17 +6408,38 @@ const StepsDetailView = defineComponent({
       patchAttr(tipReasonEl, 'hidden', !reasonText);
       patchText(tipReasonEl, reasonText);
 
-      const copyAction =
-        isAnomalousTurn && diag?.primaryAction?.kind === 'copy'
-          ? diag.primaryAction
-          : isAnomalousStep
-            ? {
-                kind: 'copy',
-                label: `复制 #${st.stepIndex} 回退指令`,
-                copyText: `我需要打断当前做法：从 #${st.stepIndex} 步开始出现异常（${reasonText || st.stepHealthBadge}），请先回退或核对 #${st.stepIndex} 之前的正确状态，再按原目标重新执行。`,
-                toast: '已复制回退指令',
-              }
-            : null;
+      let copyAction = null;
+      if (isAnomalousStep) {
+        if (diag?.category === 'context_rot' && diag?.primaryAction?.kind === 'copy') {
+          copyAction = diag.primaryAction;
+        } else if (
+          diag?.primaryAction?.kind === 'copy' &&
+          Number(diag.anchorStepIndex) === Number(st.stepIndex)
+        ) {
+          copyAction = diag.primaryAction;
+        } else if (st.stepHealthBadge === '清零' && st.stepHealthLevel !== 'critical') {
+          copyAction = {
+            kind: 'copy',
+            label: '复制稳态续写提示',
+            copyText:
+              '请继续当前任务，修改同一文件时尽量合并相邻块以降低重复预填充开销。',
+            toast: '已复制提示',
+          };
+        } else {
+          copyAction = {
+            kind: 'copy',
+            label: `复制 #${st.stepIndex} 回退指令`,
+            copyText: `我需要打断当前做法：从 #${st.stepIndex} 步开始出现异常（${reasonText || st.stepHealthBadge}），请先回退或核对 #${st.stepIndex} 之前的正确状态，再按原目标重新执行。`,
+            toast: '已复制回退指令',
+          };
+        }
+      } else if (isAnomalousTurn) {
+        if (diag?.primaryAction?.kind === 'copy') {
+          copyAction = diag.primaryAction;
+        } else if (diag?.secondaryAction?.kind === 'copy') {
+          copyAction = diag.secondaryAction;
+        }
+      }
 
       patchAttr(tipActionRowEl, 'hidden', !copyAction);
       activeTipCopyAction = copyAction || null;
@@ -6217,6 +6449,7 @@ const StepsDetailView = defineComponent({
         patchClasses(tipCopyBtn, { 'is-copied': false });
       }
 
+      currentTipRowKey = item?.rowKey || '';
       patchAttr(turnTipEl, 'hidden', false);
       if (
         typeof panelEl.getBoundingClientRect === 'function' &&
@@ -6230,8 +6463,8 @@ const StepsDetailView = defineComponent({
             panelRect.bottom - cellRect.bottom < tipH + 12 &&
             cellRect.top - panelRect.top > tipH + 6;
           const rawTopPx = placeAbove
-            ? Math.round(cellRect.top - panelRect.top - tipH - 4)
-            : Math.round(cellRect.bottom - panelRect.top + 4);
+            ? Math.round(cellRect.top - panelRect.top - tipH + 1)
+            : Math.round(cellRect.bottom - panelRect.top - 1);
           const maxTopPx = Math.max(4, Math.round(panelRect.height - tipH - 6));
           const topPx = Math.min(Math.max(4, rawTopPx), maxTopPx);
           const leftPx = Math.max(6, Math.round(cellRect.left - panelRect.left + 4));
@@ -6301,15 +6534,22 @@ const StepsDetailView = defineComponent({
         turnTipEl,
       ]
     );
-    stepsTablePane.addEventListener('scroll', hideTurnTip);
-    stepsTbody.addEventListener('mouseleave', hideTurnTip);
+    const onStepsPaneScroll = () => hideTurnTip(true);
+    const onPanelClick = (ev) => {
+      if (!pinnedTipRowKey) return;
+      if (turnTipEl.contains?.(ev?.target)) return;
+      hideTurnTip(true);
+    };
+    stepsTablePane.addEventListener('scroll', onStepsPaneScroll);
+    stepsTbody.addEventListener('mouseleave', scheduleHideTurnTip);
+    panelEl.addEventListener('click', onPanelClick);
 
     const rootEl = h('div', { className: 'view-pane' }, [panelEl]);
 
     const unsubUi = uiStore.subscribe(
       (st) => st.stepsSubTab,
       (tab) => {
-        hideTurnTip();
+        hideTurnTip(true);
         subTabSwitch.setValue(tab);
         patchAttr(stepsScroll.el, 'hidden', tab !== 'steps');
         patchAttr(modelsScroll.el, 'hidden', tab !== 'models');
@@ -6404,6 +6644,7 @@ const StepsDetailView = defineComponent({
       patchText(anomalyFilterLabel, `异常 (${anomalyCount})`);
 
       const steps = effectiveOnlyAnomalies ? rawSteps.filter(isStepAnomalous) : rawSteps;
+      const ttftBaselines = buildModelTtftBaselines(rawSteps);
 
       const models =
         (Array.isArray(scopedConv?.modelBreakdown) && scopedConv.modelBreakdown.length > 0
@@ -6459,6 +6700,7 @@ const StepsDetailView = defineComponent({
         const turnScore = useRootTurn
           ? st?.rootTurnHealthScore ?? turnDiag?.score ?? st?.turnHealthScore ?? null
           : st?.turnHealthScore ?? turnDiag?.score ?? null;
+        const ttftInfo = classifyStepTtft(st, ttftBaselines);
         return {
           st,
           rowKey: `${st.agentCascadeId || slice.cascadeId || 'conv'}-${st.stepIndex}`,
@@ -6471,6 +6713,7 @@ const StepsDetailView = defineComponent({
           turnDiag,
           turnLevel,
           turnScore,
+          ttftInfo,
         };
       });
 
@@ -6480,9 +6723,10 @@ const StepsDetailView = defineComponent({
       patchKeyedList(stepsTbody, decoratedSteps, {
         keyFn: (item) => item.rowKey,
         sigFn: (item) => {
-          const { st } = item;
+          const { st, ttftInfo } = item;
           const disp = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
-          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.totalDurationSec}:${st.thinkingDurationSec}:${st.nativeStreamSec}:${st.isComplete}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}:${st.stepHealthLevel || ''}:${st.stepHealthBadge || ''}:${st.isCacheAnomaly ? 1 : 0}:${item.turnLevel}:${item.turnScore ?? ''}:${item.hasTurn}:${item.hasUp}:${item.hasDown}:${item.isStart}:${item.isLatest}:${item.prompt}`;
+          const medSig = ttftInfo?.medianSec != null ? Math.round(ttftInfo.medianSec * 10) : -1;
+          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${ttftInfo?.isSlow ? 1 : 0}:${ttftInfo?.isStall ? 1 : 0}:${medSig}:${st.totalDurationSec}:${st.thinkingDurationSec}:${st.nativeStreamSec}:${st.isComplete}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}:${st.stepHealthLevel || ''}:${st.stepHealthBadge || ''}:${st.isCacheAnomaly ? 1 : 0}:${item.turnLevel}:${item.turnScore ?? ''}:${item.hasTurn}:${item.hasUp}:${item.hasDown}:${item.isStart}:${item.isLatest}:${item.prompt}`;
         },
         createRow: () => {
           const railLineEl = h('span', { className: 'turn-rail-line', hidden: true });
@@ -6597,12 +6841,17 @@ const StepsDetailView = defineComponent({
 
           refs.tdStep.onmouseenter = (ev) => {
             if (ev?.target === refs.agentBadgeEl) {
-              hideTurnTip();
+              hideTurnTip(true);
               return;
             }
-            showTurnTip(refs.tdStep, item);
+            requestShowTurnTip(refs.tdStep, item);
           };
           refs.tdStep.onmouseleave = scheduleHideTurnTip;
+          refs.tdStep.onclick = (ev) => {
+            if (ev?.target === refs.agentBadgeEl) return;
+            ev?.stopPropagation?.();
+            requestShowTurnTip(refs.tdStep, item, { pin: true });
+          };
 
           patchAttr(refs.agentBadgeEl, 'hidden', !hasSubagents);
           if (hasSubagents) {
@@ -6653,11 +6902,16 @@ const StepsDetailView = defineComponent({
               : modelDisplay.title
           );
           if (showBadgeTag) {
-            refs.tdModel.onmouseenter = () => showTurnTip(refs.tdStep, item);
+            refs.tdModel.onmouseenter = () => requestShowTurnTip(refs.tdStep, item);
             refs.tdModel.onmouseleave = scheduleHideTurnTip;
+            refs.tdModel.onclick = (ev) => {
+              ev?.stopPropagation?.();
+              requestShowTurnTip(refs.tdStep, item, { pin: true });
+            };
           } else {
             refs.tdModel.onmouseenter = null;
             refs.tdModel.onmouseleave = null;
+            refs.tdModel.onclick = null;
           }
 
           patchText(refs.speedMain, formatMetric(st.tokPerSec, ' t/s'));
@@ -6670,10 +6924,10 @@ const StepsDetailView = defineComponent({
           patchText(refs.speedReason, reason);
           patchAttr(refs.speedReason, 'hidden', !reason);
 
-          const ttftNum = Number(st.ttftSec);
-          const hasTtft = Number.isFinite(ttftNum);
-          const isTtftStall = hasTtft && ttftNum >= 10;
-          const isTtftSlow = hasTtft && !isTtftStall && ttftNum >= 5;
+          const ttftInfo = item.ttftInfo || classifyStepTtft(st);
+          const hasTtft = ttftInfo.hasTtft;
+          const isTtftSlow = ttftInfo.isSlow;
+          const isTtftStall = ttftInfo.isStall;
           patchText(refs.tdTtft, formatMetric(st.ttftSec, 's'));
           patchClasses(refs.tdTtft, {
             'text-muted': !isTtftSlow && !isTtftStall,
@@ -6681,14 +6935,19 @@ const StepsDetailView = defineComponent({
             'is-ttft-stall': isTtftStall,
           });
           patchText(refs.durMain, formatStepDuration(st.totalDurationSec));
-          const subTtft = hasTtft ? `首 ${ttftNum.toFixed(1)}s` : '';
+          const subTtft = hasTtft ? `首 ${ttftInfo.ttftNum.toFixed(1)}s` : '';
           patchText(refs.durSubTtft, subTtft);
           patchAttr(refs.durSubTtft, 'hidden', !subTtft);
           patchClasses(refs.durSubTtft, {
             'is-ttft-slow': isTtftSlow,
             'is-ttft-stall': isTtftStall,
           });
-          patchAttr(refs.tdDur, 'title', formatStepDurationDetail(st));
+          const durBaseTitle = formatStepDurationDetail(st);
+          const durTitle =
+            ttftInfo.medianSec !== null
+              ? `${durBaseTitle} (同模型首字中位 ${ttftInfo.medianSec.toFixed(1)}s)`
+              : durBaseTitle;
+          patchAttr(refs.tdDur, 'title', durTitle);
           const outNum = Number(st.outputTokens || 0);
           const outCompact = outNum >= 10000 ? formatTokens(outNum) : String(outNum);
           const ctxStr = `${formatTokens(st.contextTokens)}/+${outCompact}`;
@@ -6854,10 +7113,12 @@ const StepsDetailView = defineComponent({
 
     onCleanup(() => {
       cancelHideTurnTip();
+      cancelSwitchTurnTip();
       if (tipCopyTimer.id) clearTimeout(tipCopyTimer.id);
       if (flashRowTimer) clearTimeout(flashRowTimer);
-      stepsTablePane.removeEventListener('scroll', hideTurnTip);
-      stepsTbody.removeEventListener('mouseleave', hideTurnTip);
+      stepsTablePane.removeEventListener('scroll', onStepsPaneScroll);
+      stepsTbody.removeEventListener('mouseleave', scheduleHideTurnTip);
+      panelEl.removeEventListener('click', onPanelClick);
       unsubUi();
       unsubTelemetry();
       unsubView();

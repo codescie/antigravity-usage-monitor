@@ -351,6 +351,8 @@
   flex-direction: column;
   gap: 4px;
   pointer-events: auto;
+  user-select: text;
+  -webkit-user-select: text;
   animation: anim-popover-in var(--dur-instant) var(--ease-fast);
 }
 
@@ -437,6 +439,12 @@
   font-size: 10.5px;
   font-weight: 600;
   cursor: pointer;
+  user-select: none;
+}
+
+.turn-tip-copy-btn:hover {
+  background: color-mix(in srgb, var(--accent-primary) 22%, transparent);
+  border-color: var(--accent-primary);
 }
 
 .turn-tip-copy-btn.is-copied {

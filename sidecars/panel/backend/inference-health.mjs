@@ -43,6 +43,17 @@ function ihIsWorkerMarkerText(st) {
   return /Orchestrator Worker|gemini-flash-worker-agy|\bhydrogen\b/i.test(sig);
 }
 
+function ihSameCachePoolModel(a, b) {
+  if (!a || !b || a.modelKey !== b.modelKey) return false;
+  if (a.responseModel && b.responseModel && a.responseModel !== b.responseModel) {
+    return false;
+  }
+  if (a.modelShort && b.modelShort && a.modelShort !== b.modelShort) {
+    return false;
+  }
+  return true;
+}
+
 function ihBuildModelBaselines(chronoSteps, hasPlannerModel) {
   const byModel = new Map();
   for (const st of chronoSteps) {
@@ -52,7 +63,8 @@ function ihBuildModelBaselines(chronoSteps, hasPlannerModel) {
     let entry = byModel.get(key);
     if (!entry) {
       entry = {
-        demonstratesThinking: false,
+        substantiveCount: 0,
+        thinkingObsCount: 0,
         thinkShares: [],
         thinkDurShares: [],
         tpsValues: [],
@@ -60,14 +72,15 @@ function ihBuildModelBaselines(chronoSteps, hasPlannerModel) {
       byModel.set(key, entry);
     }
     const hs = st.healthSignals || {};
-    const idText = `${st.modelKey || ''} ${st.modelLabel || ''}`;
+    if ((st.outputTokens || 0) >= 120 || (st.totalDurationSec || 0) >= 1.5) {
+      entry.substantiveCount += 1;
+    }
     if (
       (st.thinkingTokens || 0) >= 80 ||
       (st.thinkingDurationSec || 0) >= 1.2 ||
-      hs.hasThinkingText === true ||
-      /-(?:xhigh|high)\b|carbon|opus|thinking/i.test(idText)
+      hs.hasThinkingText === true
     ) {
-      entry.demonstratesThinking = true;
+      entry.thinkingObsCount += 1;
     }
     if ((st.outputTokens || 0) >= 400 && (st.thinkingTokens || 0) > 0) {
       entry.thinkShares.push(st.thinkingTokens / st.outputTokens);
@@ -83,7 +96,10 @@ function ihBuildModelBaselines(chronoSteps, hasPlannerModel) {
   const resolved = new Map();
   for (const [key, raw] of byModel.entries()) {
     resolved.set(key, {
-      demonstratesThinking: raw.demonstratesThinking,
+      demonstratesThinking:
+        raw.thinkingObsCount >= 2
+          ? raw.thinkingObsCount / Math.max(1, raw.substantiveCount) >= 0.35
+          : raw.thinkingObsCount >= 1 && raw.substantiveCount <= 2,
       medianThinkShare: ihMedian(raw.thinkShares) ?? 0,
       medianThinkDurShare: ihMedian(raw.thinkDurShares) ?? 0,
       medianTps: ihMedian(raw.tpsValues),
@@ -523,9 +539,9 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
     const upstreamFault = (hs.upstreamErrorCount || 0) > 0 || (hs.retryCount || 0) > 0;
     let replicaDrift = null;
     st.cacheZeroReason = '';
+    const sameCachePool = prevNonCompact && ihSameCachePoolModel(st, prevNonCompact);
     if (
-      prevNonCompact &&
-      st.modelKey === prevNonCompact.modelKey &&
+      sameCachePool &&
       !hs.justSwitchedExecPhase &&
       isWorker === prevIsWorker &&
       prevNonCompact.createdAtMs > 0 &&
@@ -580,7 +596,7 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
     } else if (st.cacheReadTokens === 0) {
       st.cacheZeroReason = hs.justSwitchedExecPhase
         ? 'phase_switch'
-        : prevNonCompact && st.modelKey !== prevNonCompact.modelKey
+        : prevNonCompact && !sameCachePool
           ? 'model_switch'
           : 'cold_start';
     }
@@ -591,10 +607,16 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
     let zeroThinking = false;
     let burstUnderthinking = false;
     if (!isWorker && baseline.demonstratesThinking) {
+      const isBufferedTtftResponse =
+        Number.isFinite(st.ttftSec) &&
+        st.ttftSec >= 8 &&
+        (st.totalDurationSec || 0) > 0 &&
+        st.ttftSec / st.totalDurationSec >= 0.75;
       const qualifiesZeroCheck =
-        (hs.isCodeEditStep && st.outputTokens >= 500) ||
-        st.outputTokens >= 1200 ||
-        ((Boolean(replicaDrift) || upstreamFault) && st.outputTokens >= 600);
+        !isBufferedTtftResponse &&
+        ((hs.isCodeEditStep && st.outputTokens >= 500) ||
+          st.outputTokens >= 1200 ||
+          ((Boolean(replicaDrift) || upstreamFault) && st.outputTokens >= 600));
       if (
         qualifiesZeroCheck &&
         st.thinkingTokens === 0 &&

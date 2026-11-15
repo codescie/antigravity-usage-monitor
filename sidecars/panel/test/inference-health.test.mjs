@@ -666,3 +666,75 @@ test('Inference health distinguishes abnormal short-idle cache zero from benign 
   assert.equal(ttlDiag.sessionScore, 100);
   assert.equal(ttlDiag.activeAlert, null);
 });
+
+test('Inference health ignores cross-upstream-model cache shifts and buffered TTFT non-split thinking', async () => {
+  const mkOrchestratorStep = ({
+    stepIndex,
+    createdAt,
+    finishedGeneratingAt,
+    responseModel,
+    modelDisplayName,
+    cacheReadTokens,
+    inputTokens,
+    thinkingTokens,
+    responseTokens,
+    ttft,
+  }) => {
+    const base = mkPlannerStep({
+      stepIndex,
+      createdAt,
+      finishedGeneratingAt,
+      model: 'MODEL_PLACEHOLDER_M667',
+      modelDisplayName,
+      inputTokens,
+      cacheReadTokens,
+      thinkingTokens,
+      responseTokens,
+      ttft,
+      thinkingDuration: '0s',
+      thinking: '',
+    });
+    base.metadata.generatorMetadata[0].chatModel.responseModel = responseModel;
+    return base;
+  };
+
+  const rawSteps = [
+    mkUserStep('切换编排规划与执行层请求并包含缓冲响应', '2026-01-01T08:00:00Z', 0),
+    mkOrchestratorStep({
+      stepIndex: 1,
+      createdAt: '2026-01-01T08:00:01Z',
+      finishedGeneratingAt: '2026-01-01T08:00:44Z',
+      responseModel: 'orchestrator-carbon',
+      modelDisplayName: 'Orchestrator (Carbon)',
+      cacheReadTokens: 250000,
+      inputTokens: 3000,
+      thinkingTokens: 0,
+      responseTokens: 3900,
+      ttft: '42.9s',
+    }),
+    mkOrchestratorStep({
+      stepIndex: 2,
+      createdAt: '2026-01-01T08:00:44Z',
+      finishedGeneratingAt: '2026-01-01T08:00:50Z',
+      responseModel: 'gemini-flash-worker-agy',
+      modelDisplayName: 'Orchestrator Worker (Hydrogen)',
+      cacheReadTokens: 18800,
+      inputTokens: 160000,
+      thinkingTokens: 0,
+      responseTokens: 350,
+      ttft: '2.1s',
+    }),
+  ];
+
+  const h = backendHarness({
+    trajectories: { cross1: { trajectory: { steps: rawSteps }, numTotalSteps: rawSteps.length } },
+    summaries: { cross1: { stepCount: rawSteps.length, lastModifiedTime: '2026-01-01T08:00:50Z', status: 'IDLE', annotations: { title: 'Cross Pool' } } },
+  });
+  const payload = await h.buildTelemetryPayloadInternal('cross1');
+  const health = payload.activeConversation.inferenceHealth;
+  assert.equal(health.activeAlert, null);
+  for (const st of payload.activeConversation.recentSteps) {
+    assert.equal(st.isCacheAnomaly, false, 'Different responseModel under shared placeholder must not trigger rewind');
+    assert.equal(st.stepHealthBadge, '');
+  }
+});

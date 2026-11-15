@@ -1458,7 +1458,7 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
             modelKey: 'MODEL_PLACEHOLDER_M429',
             modelShort: 'gemini-4-carbon',
             tokPerSec: 120.5,
-            ttftSec: 2.3,
+            ttftSec: 8.4,
             totalDurationSec: 45,
             isComplete: true,
             contextTokens: 274000,
@@ -1476,8 +1476,8 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
             stepIndex: 2,
             turnIndex: 1,
             isTurnStart: false,
-            modelKey: 'MODEL_PLACEHOLDER_M429',
-            modelShort: 'gemini-4-carbon',
+            modelKey: 'MODEL_PLACEHOLDER_M667',
+            modelShort: 'worker-agy-hydrogen',
             tokPerSec: 65,
             ttftSec: 8.4,
             totalDurationSec: 12,
@@ -1539,9 +1539,25 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     assert.equal(stepsBody2.children[0].querySelector('.col-model').querySelector('.model-cell-name').textContent, 'gemini-4-carbon');
     assert.equal(stepsBody2.children[0].querySelector('.col-speed').children[0].textContent, '120.5 t/s');
     assert.equal(stepsBody2.children[0].querySelector('.col-ctx').textContent, '274.0k/+6200');
+    assert.equal(stepsBody2.children[0].querySelector('.dur-sub-ttft').textContent, '首 8.4s');
+    assert.equal(stepsBody2.children[0].querySelector('.dur-sub-ttft').classList.contains('is-ttft-slow'), false, 'Deep reasoning model (carbon) treats 8.4s TTFT as normal');
     assert.equal(stepsBody2.children[1].querySelector('.col-ctx').textContent, '264.0k/+13.9k');
     assert.equal(stepsBody2.children[1].querySelector('.dur-sub-ttft').textContent, '首 8.4s');
-    assert.equal(stepsBody2.children[1].querySelector('.dur-sub-ttft').classList.contains('is-ttft-slow'), true);
+    assert.equal(stepsBody2.children[1].querySelector('.dur-sub-ttft').classList.contains('is-ttft-slow'), true, 'Lightweight worker model highlights 8.4s TTFT as slow');
+
+    const turnTipEl = popoverEl.querySelector('.turn-prompt-tip');
+    assert.ok(turnTipEl, 'Turn/anomaly prompt tooltip mounted');
+    stepsBody2.children[0].querySelector('.step-cell').onmouseenter({});
+    stepsBody2.dispatchEvent({ type: 'mouseleave' });
+    turnTipEl.onmouseenter();
+    assert.equal(turnTipEl.hasAttribute('hidden'), false, 'Leaving stepsTbody into tooltip keeps tooltip visible');
+    mockWindow.__AGLastCopiedText = '';
+    const tipCopyBtn = turnTipEl.querySelector('.turn-tip-copy-btn');
+    assert.ok(tipCopyBtn, 'Tooltip copy button mounted');
+    tipCopyBtn.dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 15));
+    assert.ok(mockWindow.__AGLastCopiedText.includes('#5'), 'Tooltip copy button writes step-specific prompt');
+    turnTipEl.onmouseleave();
     assert.match(stylesCss, /\.steps-data-table\s+td\.model-cell[\s\S]*?max-width:\s*0/, 'Compiled styles.css guards model-cell width squeeze');
     assert.match(stylesCss, /\.steps-data-table\s+\.col-cost[\s\S]*?padding-right:\s*10px/, 'Compiled styles.css preserves 10px right padding on col-cost');
     assert.equal(stylesCss.includes('.turn-rail.tone-warn'), false, 'Compiled styles.css drops full-turn orange rail painting');
@@ -1565,4 +1581,41 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     assert.equal(mockDocument.getElementById('ag-usage-monitor-capsule'), null);
     assert.equal(mockDocument.getElementById('ag-usage-monitor-portal'), null);
   }
+});
+
+test('POST /api/clipboard writes text via native clipboard command', async () => {
+  let recorded = null;
+  const h = backendHarness({
+    execFileImpl: (cmd, args, opts, cb) => {
+      const stdinChunks = [];
+      recorded = { cmd, args, stdinChunks };
+      const child = {
+        on() {},
+        stdin: {
+          on() {},
+          end(buf) {
+            if (buf) stdinChunks.push(buf);
+            if (cb) cb(null);
+          },
+        },
+      };
+      return child;
+    },
+  });
+
+  const okRes = await h.dispatchBridgeApiRequest('/api/clipboard', 'POST', { text: '回退指令测试' });
+  assert.equal(okRes.status, 200);
+  assert.equal(JSON.parse(okRes.body).ok, true);
+  const expectedCmd =
+    process.platform === 'win32'
+      ? 'clip'
+      : process.platform === 'darwin'
+        ? 'pbcopy'
+        : 'xclip';
+  assert.equal(recorded?.cmd, expectedCmd);
+  assert.equal(recorded?.stdinChunks.length, 1);
+
+  const badRes = await h.dispatchBridgeApiRequest('/api/clipboard', 'POST', { text: '' });
+  assert.equal(badRes.status, 400);
+  assert.equal(JSON.parse(badRes.body).ok, false);
 });

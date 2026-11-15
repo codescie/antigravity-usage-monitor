@@ -11,6 +11,7 @@
  * - 所有核心业务逻辑均已模块化拆分至 `./backend/*.mjs`。
  */
 
+import { execFile } from 'node:child_process';
 import { readFileSync, promises as fsPromises } from 'node:fs';
 import { join } from 'node:path';
 import { Response, SidecarApp } from 'sidecar_sdk';
@@ -360,12 +361,74 @@ async function executeContextWindowSwitchAction(data) {
   };
 }
 
+function writeSystemClipboard(text) {
+  return new Promise((resolve) => {
+    if (typeof execFile !== 'function') {
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    const done = (ok) => {
+      if (!settled) {
+        settled = true;
+        resolve(Boolean(ok));
+      }
+    };
+    try {
+      let cmd = '';
+      let args = [];
+      let opts = { timeout: 4000 };
+      let buf = null;
+      if (process.platform === 'win32') {
+        cmd = 'clip';
+        opts = { windowsHide: true, timeout: 4000 };
+        buf = Buffer.from(`\ufeff${text}`, 'utf16le');
+      } else if (process.platform === 'darwin') {
+        cmd = 'pbcopy';
+        buf = Buffer.from(text, 'utf8');
+      } else {
+        cmd = 'xclip';
+        args = ['-selection', 'clipboard'];
+        buf = Buffer.from(text, 'utf8');
+      }
+      const child = execFile(cmd, args, opts, (err) => done(!err));
+      child?.on?.('error', () => done(false));
+      child?.stdin?.on?.('error', () => {});
+      child?.stdin?.end?.(buf);
+    } catch {
+      done(false);
+    }
+  });
+}
+
+async function executeClipboardAction(data) {
+  const text = typeof data?.text === 'string' ? data.text : '';
+  if (!text || text.length > 32768) {
+    return {
+      status: 400,
+      contentType: 'application/json',
+      headers: { 'Cache-Control': 'no-store' },
+      body: JSON.stringify({ ok: false, error: 'Invalid clipboard text' }),
+    };
+  }
+  const ok = await writeSystemClipboard(text);
+  return {
+    status: ok ? 200 : 500,
+    contentType: 'application/json',
+    headers: { 'Cache-Control': 'no-store' },
+    body: JSON.stringify({ ok }),
+  };
+}
+
 async function dispatchBridgeApiRequest(pathname, method, data) {
   if (pathname === '/api/telemetry' && method === 'GET') {
     return executeTelemetryAction(data);
   }
   if (pathname === '/api/settings' && method === 'POST') {
     return executeSettingsAction(data);
+  }
+  if (pathname === '/api/clipboard' && method === 'POST') {
+    return executeClipboardAction(data);
   }
   if (pathname === '/api/cloud-sync' && method === 'POST') {
     return executeCloudSyncAction();
@@ -556,6 +619,21 @@ app.api('/api/context-window/switch', async (data, req) => {
     });
   }
   const out = await executeContextWindowSwitchAction(data);
+  return new Response(out.body, {
+    status: out.status,
+    contentType: out.contentType,
+    headers: out.headers,
+  });
+});
+
+app.api('/api/clipboard', async (data, req) => {
+  if (!isLocalHostRequest(req)) {
+    return new Response(JSON.stringify({ error: 'Forbidden host or origin' }), {
+      status: 403,
+      contentType: 'application/json',
+    });
+  }
+  const out = await executeClipboardAction(data);
   return new Response(out.body, {
     status: out.status,
     contentType: out.contentType,
