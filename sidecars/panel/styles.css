@@ -2976,12 +2976,12 @@ input {
 /* --- 3. 极简对话轮次导轨与起点圆点 (Minimalist Turn Rail & Origin Dot) --- */
 .steps-data-table th,
 .steps-data-table td {
-  padding: 5px 3px;
+  padding: 5.5px 3px;
 }
 
 .steps-data-table th.step-col-head,
 .steps-data-table td.step-cell {
-  padding-left: 15px;
+  padding-left: 14px;
 }
 
 .steps-data-table td.step-cell {
@@ -2996,12 +2996,19 @@ input {
 .steps-data-table td.model-cell {
   width: 99%;
   max-width: 0;
-  min-width: 72px;
+  min-width: 60px;
   overflow: hidden;
 }
 
 .steps-data-table.has-subagents td.model-cell {
-  min-width: 64px;
+  min-width: 52px;
+}
+
+.models-data-table td.model-cell {
+  width: 99%;
+  max-width: 0;
+  min-width: 84px;
+  overflow: hidden;
 }
 
 .model-cell-inner {
@@ -3014,92 +3021,93 @@ input {
 }
 
 .model-cell-name {
+  display: inline-flex;
+  align-items: baseline;
   min-width: 0;
+  max-width: 100%;
   flex: 1 1 auto;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.steps-data-table .dur-main {
-  display: block;
-  font-size: 11px;
-  line-height: 1.2;
-  color: var(--text-primary);
+.model-name-head {
+  flex: 0 1000 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
 }
 
-.steps-data-table .dur-sub-ttft {
-  display: none;
-  margin-top: 1.5px;
-  font-size: 10px;
-  font-weight: 600;
+.model-name-head:not(:empty) {
+  min-width: 12px;
+}
+
+.model-name-tail {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
+.steps-data-table .ttft-val {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 500;
   line-height: 1.25;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
 
-.steps-data-table .col-ttft.is-ttft-slow,
-.steps-data-table .dur-sub-ttft.is-ttft-slow {
+.steps-data-table .ttft-val.text-muted {
+  color: var(--text-muted);
+}
+
+.steps-data-table .ttft-val.is-ttft-slow {
+  padding: 0 3.5px;
+  border-radius: var(--radius-xs);
   color: var(--metric-warn);
+  background: var(--metric-warn-soft);
   font-weight: 600;
 }
 
-.steps-data-table .dur-sub-ttft.is-ttft-slow {
+.steps-data-table .ttft-val.is-ttft-stall {
   padding: 0 3.5px;
   border-radius: var(--radius-xs);
-  background: var(--metric-warn-soft);
-}
-
-.steps-data-table .col-ttft.is-ttft-stall,
-.steps-data-table .dur-sub-ttft.is-ttft-stall {
   color: var(--metric-danger);
+  background: color-mix(in srgb, var(--metric-danger) 13%, transparent);
   font-weight: 700;
 }
 
-.steps-data-table .dur-sub-ttft.is-ttft-stall {
-  padding: 0 3.5px;
-  border-radius: var(--radius-xs);
-  background: color-mix(in srgb, var(--metric-danger) 13%, transparent);
+.steps-data-table .dur-main {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
 
-@container steps-table (max-width: 540px) {
-  .steps-data-table.has-subagents .col-ttft {
-    display: none;
-  }
-  .steps-data-table.has-subagents .dur-sub-ttft:not([hidden]) {
-    display: inline-block;
-  }
-}
-
-@container steps-table (max-width: 500px) {
-  .steps-data-table .col-ttft {
-    display: none;
-  }
-  .steps-data-table .dur-sub-ttft:not([hidden]) {
-    display: inline-block;
-  }
-}
-
-@container steps-table (max-width: 462px) {
+@container steps-table (max-width: 445px) {
   .steps-data-table th,
   .steps-data-table td {
-    padding: 5px 2.5px;
+    padding: 5px 2px;
   }
   .steps-data-table td.model-cell {
-    min-width: 64px;
+    min-width: 52px;
   }
   .steps-data-table.has-subagents td.model-cell {
-    min-width: 56px;
+    min-width: 46px;
   }
 }
 
-@container steps-table (max-width: 412px) {
+@container steps-table (max-width: 405px) {
   .steps-data-table .col-cache {
     display: none;
   }
 }
 
-@container steps-table (max-width: 358px) {
+@container steps-table (max-width: 350px) {
   .steps-data-table .col-ctx {
     display: none;
   }

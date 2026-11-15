@@ -21,12 +21,14 @@ import {
   formatMetric,
   formatStepDuration,
   formatStepDurationDetail,
+  formatStepTtftDetail,
   formatTokens,
   formatUsd,
   normalizeOrchestratorIdDisplayMode,
   resolveModelDisplayInfo,
   sampleSummary,
   speedReasonText,
+  splitModelHeadTail,
 } from '../core/formatters.js';
 import { createSvgIcon, patchSvgIcon } from '../icons/SvgIcon.js';
 import {
@@ -82,8 +84,8 @@ export const StepsDetailView = defineComponent({
           h('th', { className: 'step-col-head', text: '步序' }),
           h('th', { className: 'col-model', text: '模型' }),
           h('th', { className: 'col-speed', text: '速度' }),
-          h('th', { className: 'col-ttft', text: '首字' }),
-          h('th', { className: 'col-dur', text: '耗时' }),
+          h('th', { className: 'col-ttft', title: '首 Token 耗时 (TTFT)', text: '首字' }),
+          h('th', { className: 'col-dur', title: '单步总耗时', text: '耗时' }),
           h('th', { className: 'col-ctx', text: '上下文 / 输出' }),
           h('th', { className: 'col-cache', text: '缓存' }),
           h('th', { className: 'col-cost', text: '费用' }),
@@ -351,10 +353,10 @@ export const StepsDetailView = defineComponent({
     // --- 子表 2：按模型汇总表（列定义：模型名称、调用次数、有效均速、总 Token、费用） ---
     const modelsTbody = h('tbody');
     const modelsTablePane = h('div', { className: 'table-viewport' }, [
-      h('table', { className: 'data-table' }, [
+      h('table', { className: 'data-table models-data-table' }, [
         h('thead', {}, [
           h('tr', {}, [
-            h('th', { text: '模型' }),
+            h('th', { className: 'col-model', text: '模型' }),
             h('th', { text: '次数' }),
             h('th', { text: '均速' }),
             h('th', { text: '总 Token' }),
@@ -608,7 +610,12 @@ export const StepsDetailView = defineComponent({
           ]);
 
           const stepHealthTagEl = h('span', { className: 'step-health-tag', hidden: true });
-          const modelNameEl = h('span', { className: 'model-cell-name' });
+          const modelHeadEl = h('span', { className: 'model-name-head' });
+          const modelTailEl = h('span', { className: 'model-name-tail' });
+          const modelNameEl = h('span', { className: 'model-cell-name' }, [
+            modelHeadEl,
+            modelTailEl,
+          ]);
           const modelInnerEl = h('div', { className: 'model-cell-inner' }, [
             stepHealthTagEl,
             modelNameEl,
@@ -621,10 +628,10 @@ export const StepsDetailView = defineComponent({
           const speedReason = h('div', { className: 'text-muted', style: 'font-size: 9.5px;' });
           const tdSpeed = h('td', { className: 'col-speed' }, [speedMain, speedReason]);
 
-          const tdTtft = h('td', { className: 'col-ttft text-muted' });
+          const ttftValEl = h('span', { className: 'ttft-val' });
+          const tdTtft = h('td', { className: 'col-ttft' }, [ttftValEl]);
           const durMain = h('span', { className: 'dur-main cell-value' });
-          const durSubTtft = h('div', { className: 'dur-sub-ttft', hidden: true });
-          const tdDur = h('td', { className: 'col-dur' }, [durMain, durSubTtft]);
+          const tdDur = h('td', { className: 'col-dur' }, [durMain]);
           const tdCtx = h('td', { className: 'col-ctx' });
           const tdCache = h('td', {
             className: 'col-cache cell-value accent-ok',
@@ -646,13 +653,15 @@ export const StepsDetailView = defineComponent({
               stepHealthTagEl,
               tdModel,
               modelNameEl,
+              modelHeadEl,
+              modelTailEl,
               tdSpeed,
               speedMain,
               speedReason,
               tdTtft,
+              ttftValEl,
               tdDur,
               durMain,
-              durSubTtft,
               tdCtx,
               tdCache,
               tdCost,
@@ -752,7 +761,9 @@ export const StepsDetailView = defineComponent({
           }
 
           const modelDisplay = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
-          patchText(refs.modelNameEl, modelDisplay.text);
+          const { head: modelHead, tail: modelTail } = splitModelHeadTail(modelDisplay.text);
+          patchText(refs.modelHeadEl, modelHead);
+          patchText(refs.modelTailEl, modelTail);
           patchAttr(
             refs.tdModel,
             'title',
@@ -787,26 +798,19 @@ export const StepsDetailView = defineComponent({
           const hasTtft = ttftInfo.hasTtft;
           const isTtftSlow = ttftInfo.isSlow;
           const isTtftStall = ttftInfo.isStall;
-          patchText(refs.tdTtft, formatMetric(st.ttftSec, 's'));
+          patchText(refs.ttftValEl, formatMetric(st.ttftSec, 's'));
+          patchClasses(refs.ttftValEl, {
+            'text-muted': !hasTtft,
+            'is-ttft-slow': isTtftSlow,
+            'is-ttft-stall': isTtftStall,
+          });
           patchClasses(refs.tdTtft, {
-            'text-muted': !isTtftSlow && !isTtftStall,
             'is-ttft-slow': isTtftSlow,
             'is-ttft-stall': isTtftStall,
           });
+          patchAttr(refs.tdTtft, 'title', formatStepTtftDetail(st, ttftInfo));
           patchText(refs.durMain, formatStepDuration(st.totalDurationSec));
-          const subTtft = hasTtft ? `首 ${ttftInfo.ttftNum.toFixed(1)}s` : '';
-          patchText(refs.durSubTtft, subTtft);
-          patchAttr(refs.durSubTtft, 'hidden', !subTtft);
-          patchClasses(refs.durSubTtft, {
-            'is-ttft-slow': isTtftSlow,
-            'is-ttft-stall': isTtftStall,
-          });
-          const durBaseTitle = formatStepDurationDetail(st);
-          const durTitle =
-            ttftInfo.medianSec !== null
-              ? `${durBaseTitle} (同模型首字中位 ${ttftInfo.medianSec.toFixed(1)}s)`
-              : durBaseTitle;
-          patchAttr(refs.tdDur, 'title', durTitle);
+          patchAttr(refs.tdDur, 'title', formatStepDurationDetail(st));
           const outNum = Number(st.outputTokens || 0);
           const outCompact = outNum >= 10000 ? formatTokens(outNum) : String(outNum);
           const ctxStr = `${formatTokens(st.contextTokens)}/+${outCompact}`;
@@ -853,9 +857,16 @@ export const StepsDetailView = defineComponent({
           return `${disp.text}:${disp.title}:${m.calls}:${m.avgTokPerSec}:${m.totalTokens}:${m.costUsd}:${m.unpricedCalls}:${m.speedSummary?.sampleCount}`;
         },
         createRow: () => {
+          const modelHeadEl = h('span', { className: 'model-name-head' });
+          const modelTailEl = h('span', { className: 'model-name-tail' });
+          const modelNameEl = h('span', { className: 'model-cell-name' }, [
+            modelHeadEl,
+            modelTailEl,
+          ]);
           const tdName = h('td', {
-            style: 'font-weight: 600; max-width: 165px; overflow: hidden; text-overflow: ellipsis;',
-          });
+            className: 'col-model model-cell',
+            style: 'font-weight: 600;',
+          }, [modelNameEl]);
           const tdCalls = h('td');
           const speedMain = h('div');
           const speedSub = h('div', { className: 'text-muted', style: 'font-size: 9.5px;' });
@@ -865,12 +876,14 @@ export const StepsDetailView = defineComponent({
           const tr = h('tr', {}, [tdName, tdCalls, tdSpeed, tdTokens, tdCost]);
           return {
             el: tr,
-            refs: { tdName, tdCalls, speedMain, speedSub, tdTokens, tdCost },
+            refs: { tdName, modelHeadEl, modelTailEl, tdCalls, speedMain, speedSub, tdTokens, tdCost },
           };
         },
         updateRow: (refs, m) => {
           const modelDisplay = resolveModelDisplayInfo(m, displaySettings, { fallback: '—' });
-          patchText(refs.tdName, modelDisplay.text);
+          const { head: modelHead, tail: modelTail } = splitModelHeadTail(modelDisplay.text);
+          patchText(refs.modelHeadEl, modelHead);
+          patchText(refs.modelTailEl, modelTail);
           patchAttr(refs.tdName, 'title', modelDisplay.title);
           patchText(refs.tdCalls, String(Number(m.calls || 0)));
           patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' t/s'));

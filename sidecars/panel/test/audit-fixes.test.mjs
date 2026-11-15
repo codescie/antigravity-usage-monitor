@@ -10,8 +10,10 @@ import {
 } from '../speed-metrics.mjs';
 import {
   formatCountdown,
+  formatStepTtftDetail,
   formatUsd,
   speedReasonText,
+  splitModelHeadTail,
 } from '../src/core/formatters.js';
 import { createReactiveStore } from '../src/core/reactive.js';
 import { stripModuleSyntax } from '../scripts/build-bundle.mjs';
@@ -583,4 +585,45 @@ test('Compaction liveActivity: detects in-progress & completed CHECKPOINT over p
   const pTranscriptOnly = await h.buildTelemetryPayloadInternal(convId, true);
   assert.equal(pTranscriptOnly.activeConversation.liveActivity.phase, 'compacting');
   assert.equal(pTranscriptOnly.activeConversation.liveActivity.label, '上下文压缩');
+});
+
+test('splitModelHeadTail preserves distinguishing model suffixes and formatStepTtftDetail formats TTFT diagnostics', () => {
+  const cases = [
+    ['gemini-4-carbon', 'gemini-', '4-carbon'],
+    ['worker-agy-hydrogen', 'worker-agy-', 'hydrogen'],
+    ['orchestrator-carbon', 'orchestrator-', 'carbon'],
+    ['orchestrator-carbon·压缩', 'orchestrator-', 'carbon·压缩'],
+    ['gemini-3.1-pro-high', 'gemini-3.1-', 'pro-high'],
+    ['claude-opus-4-6-thinking', 'claude-opus-4-', '6-thinking'],
+    ['claude-sonnet-4-6', 'claude-', 'sonnet-4-6'],
+    ['gemini-flash-worker-agy (hydrogen-4)', 'gemini-flash-worker-agy ', '(hydrogen-4)'],
+    ['gpt-5-mini', '', 'gpt-5-mini'],
+    ['—', '', '—'],
+  ];
+  for (const [input, expectedHead, expectedTail] of cases) {
+    const res = splitModelHeadTail(input);
+    assert.equal(res.head, expectedHead, `head mismatch for ${input}`);
+    assert.equal(res.tail, expectedTail, `tail mismatch for ${input}`);
+    assert.equal(res.head + res.tail, input, `lossless concat for ${input}`);
+  }
+
+  assert.equal(
+    formatStepTtftDetail({ isComplete: false, ttftSec: null }),
+    '等待首 Token 响应中'
+  );
+  assert.equal(
+    formatStepTtftDetail({ isComplete: true, ttftSec: null }),
+    '无有效首 Token 耗时记录'
+  );
+  assert.equal(
+    formatStepTtftDetail(
+      { ttftSec: 8.4, thinkingDurationSec: 5.25 },
+      { medianSec: 4.1, isSlow: true, isStall: false }
+    ),
+    '首 Token 耗时 8.40s · 思考 5.25s (同模型中位 4.1s) · 较慢'
+  );
+  assert.equal(
+    formatStepTtftDetail({ ttftSec: 25.0 }, { medianSec: 6.0, isSlow: false, isStall: true }),
+    '首 Token 耗时 25.00s (同模型中位 6.0s) · 明显卡顿'
+  );
 });

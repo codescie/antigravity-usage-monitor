@@ -1324,10 +1324,14 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     assert.equal(delivered, 1);
     await new Promise((r) => setTimeout(r, 20));
     const stepsBody = stepsTable.children[1];
+    const stepTtftCell = stepsBody.querySelector('.col-ttft');
     const stepDurCell = stepsBody.querySelector('.col-dur');
+    assert.ok(stepTtftCell, 'TTFT cell rendered in StepsDetailView');
+    assert.equal(stepTtftCell.querySelector('.ttft-val').textContent, '2.3s');
+    assert.ok(stepTtftCell.getAttribute('title').includes('首 Token 耗时 2.34s'));
     assert.ok(stepDurCell, 'Duration cell rendered in StepsDetailView');
     assert.equal(stepDurCell.querySelector('.dur-main').textContent, '1m05s');
-    assert.equal(stepDurCell.querySelector('.dur-sub-ttft').textContent, '首 2.3s');
+    assert.equal(stepDurCell.querySelector('.dur-sub-ttft'), null, 'TTFT is separated out of col-dur');
     assert.ok(stepDurCell.getAttribute('title').includes('总耗时 65.40s'));
     assert.equal(ctxPctEl.textContent, '25%', 'CDP relay delivered live telemetry without HTTP');
     assert.equal(speedSegEl.children[0].textContent, '121 t/s');
@@ -1536,14 +1540,17 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     assert.equal(stepsBody2.children[0].classList.contains('is-step-flash'), true, 'Target step row #5 flashes on jump');
     assert.equal(stepsBody2.children[0].querySelector('.step-cell').querySelector('.step-health-tag'), null, 'Step health badge moved out of step-cell');
     assert.equal(stepsBody2.children[0].querySelector('.col-model').querySelector('.step-health-tag').textContent, '切流');
-    assert.equal(stepsBody2.children[0].querySelector('.col-model').querySelector('.model-cell-name').textContent, 'gemini-4-carbon');
+    assert.equal(stepsBody2.children[0].querySelector('.col-model').querySelector('.model-name-head').textContent, 'gemini-');
+    assert.equal(stepsBody2.children[0].querySelector('.col-model').querySelector('.model-name-tail').textContent, '4-carbon');
     assert.equal(stepsBody2.children[0].querySelector('.col-speed').children[0].textContent, '120.5 t/s');
     assert.equal(stepsBody2.children[0].querySelector('.col-ctx').textContent, '274.0k/+6200');
-    assert.equal(stepsBody2.children[0].querySelector('.dur-sub-ttft').textContent, '首 8.4s');
-    assert.equal(stepsBody2.children[0].querySelector('.dur-sub-ttft').classList.contains('is-ttft-slow'), false, 'Deep reasoning model (carbon) treats 8.4s TTFT as normal');
+    assert.equal(stepsBody2.children[0].querySelector('.col-ttft').querySelector('.ttft-val').textContent, '8.4s');
+    assert.equal(stepsBody2.children[0].querySelector('.col-ttft').querySelector('.ttft-val').classList.contains('is-ttft-slow'), false, 'Deep reasoning model (carbon) treats 8.4s TTFT as normal');
+    assert.equal(stepsBody2.children[1].querySelector('.col-model').querySelector('.model-name-head').textContent, 'worker-agy-');
+    assert.equal(stepsBody2.children[1].querySelector('.col-model').querySelector('.model-name-tail').textContent, 'hydrogen');
     assert.equal(stepsBody2.children[1].querySelector('.col-ctx').textContent, '264.0k/+13.9k');
-    assert.equal(stepsBody2.children[1].querySelector('.dur-sub-ttft').textContent, '首 8.4s');
-    assert.equal(stepsBody2.children[1].querySelector('.dur-sub-ttft').classList.contains('is-ttft-slow'), true, 'Lightweight worker model highlights 8.4s TTFT as slow');
+    assert.equal(stepsBody2.children[1].querySelector('.col-ttft').querySelector('.ttft-val').textContent, '8.4s');
+    assert.equal(stepsBody2.children[1].querySelector('.col-ttft').querySelector('.ttft-val').classList.contains('is-ttft-slow'), true, 'Lightweight worker model highlights 8.4s TTFT as slow');
 
     const turnTipEl = popoverEl.querySelector('.turn-prompt-tip');
     assert.ok(turnTipEl, 'Turn/anomaly prompt tooltip mounted');
@@ -1558,7 +1565,10 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     await new Promise((r) => setTimeout(r, 15));
     assert.ok(mockWindow.__AGLastCopiedText.includes('#5'), 'Tooltip copy button writes step-specific prompt');
     turnTipEl.onmouseleave();
+    assert.equal(stylesCss.includes('.dur-sub-ttft'), false, 'Compiled styles.css removes stacked dur-sub-ttft');
+    assert.equal(/@container[\s\S]*?\.col-ttft[\s\S]*?display:\s*none/.test(stylesCss), false, 'Compiled styles.css never hides separate TTFT column');
     assert.match(stylesCss, /\.steps-data-table\s+td\.model-cell[\s\S]*?max-width:\s*0/, 'Compiled styles.css guards model-cell width squeeze');
+    assert.match(stylesCss, /\.model-name-head[\s\S]*?flex:\s*0\s+1000\s+auto/, 'Compiled styles.css shrinks leading model prefix before tail');
     assert.match(stylesCss, /\.steps-data-table\s+\.col-cost[\s\S]*?padding-right:\s*10px/, 'Compiled styles.css preserves 10px right padding on col-cost');
     assert.equal(stylesCss.includes('.turn-rail.tone-warn'), false, 'Compiled styles.css drops full-turn orange rail painting');
 

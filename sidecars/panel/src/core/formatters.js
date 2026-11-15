@@ -141,6 +141,32 @@ export function formatStepDurationDetail(step) {
 }
 
 /**
+ * 格式化单步首 Token 耗时 (TTFT) 悬停详情。
+ *
+ * @param {object|null|undefined} step
+ * @param {{ isSlow?: boolean, isStall?: boolean, medianSec?: number|null }|null} [ttftInfo]
+ * @returns {string}
+ */
+export function formatStepTtftDetail(step, ttftInfo = null) {
+  if (!Number.isFinite(step?.ttftSec) || step.ttftSec < 0) {
+    return step?.isComplete === false ? '等待首 Token 响应中' : '无有效首 Token 耗时记录';
+  }
+  let text = `首 Token 耗时 ${Number(step.ttftSec).toFixed(2)}s`;
+  if (Number.isFinite(step?.thinkingDurationSec) && step.thinkingDurationSec > 0) {
+    text += ` · 思考 ${Number(step.thinkingDurationSec).toFixed(2)}s`;
+  }
+  if (ttftInfo && ttftInfo.medianSec !== null && Number.isFinite(ttftInfo.medianSec)) {
+    text += ` (同模型中位 ${ttftInfo.medianSec.toFixed(1)}s)`;
+  }
+  if (ttftInfo?.isStall) {
+    text += ' · 明显卡顿';
+  } else if (ttftInfo?.isSlow) {
+    text += ' · 较慢';
+  }
+  return text;
+}
+
+/**
  * 归一化 Orchestrator 系列 ID 显示格式枚举（`'compact'` 精简代号 vs `'full'` 原始完整 ID，默认 `'compact'`）。
  *
  * @param {unknown} mode
@@ -237,6 +263,39 @@ export function resolveModelDisplayInfo(target, settings = {}, options = {}) {
       ? target.upstreamModels.join(' / ')
       : standardText;
   return { text: standardText, title: standardTitle, isOrchestratorSeries: false };
+}
+
+/**
+ * 将模型名称拆分为可优先折叠的前缀 (`head`) 与需优先保留的核心区分尾部 (`tail`)。
+ * 保证在纯 LTR 排版下严格满足 `head + tail === normalizedStr`。
+ *
+ * @param {unknown} rawText
+ * @returns {{ head: string, tail: string }}
+ */
+export function splitModelHeadTail(rawText) {
+  const str = String(rawText ?? '').replace(/[\r\n]+/g, ' ');
+  if (str.length <= 10) {
+    return { head: '', tail: str };
+  }
+  const parenMatch = str.match(/^(.+?\s+)(\([^()]+\)(?:·压缩)?)$/);
+  if (parenMatch && parenMatch[2].length <= 16) {
+    return { head: parenMatch[1], tail: parenMatch[2] };
+  }
+  const parts = str.match(/[^-_/\s]+[-_/\s]*/g);
+  if (!parts || parts.length <= 1) {
+    return { head: str.slice(0, -9), tail: str.slice(-9) };
+  }
+  let tail = parts[parts.length - 1];
+  let idx = parts.length - 2;
+  while (idx >= 1 && tail.length + parts[idx].length <= 10) {
+    tail = parts[idx] + tail;
+    idx -= 1;
+  }
+  const head = parts.slice(0, idx + 1).join('');
+  if (!head) {
+    return { head: str.slice(0, -9), tail: str.slice(-9) };
+  }
+  return { head, tail };
 }
 
 /**
