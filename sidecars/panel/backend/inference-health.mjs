@@ -14,8 +14,9 @@
  *    支持用户显式否定与 `git checkout/restore/reset` 回滚确认。
  */
 
-const IH_REPLICA_DT_MAX_SEC = 240;
-const IH_REPLICA_PREV_CACHE_MIN = 32768;
+const IH_CACHE_TTL_MAX_SEC = 295;
+const IH_CACHE_ZERO_PREV_MIN = 12000;
+const IH_REPLICA_PREV_CACHE_MIN = 24000;
 
 function ihMedian(nums) {
   if (!Array.isArray(nums) || nums.length === 0) return null;
@@ -101,6 +102,8 @@ function ihBuildTurnDiagnosis({
   let infraCount = 0;
   let upstreamCount = 0;
   let driftCount = 0;
+  let zeroCacheCount = 0;
+  let partialDriftCount = 0;
   let zeroThinkCount = 0;
   let burstThinkCount = 0;
   let editFaultCount = 0;
@@ -113,7 +116,21 @@ function ihBuildTurnDiagnosis({
   let userRejectedTurn = false;
   let confirmedRollback = false;
   let anchorStepIndex = null;
-  const reasons = [];
+  let bestAnchorScore = -1;
+  const candidateReasons = [];
+
+  let lastAnomIdx = -1;
+  for (let i = 0; i < turnSteps.length; i++) {
+    const f = stepFindingsMap.get(turnSteps[i]) || {};
+    if ((f.stepPoints || 0) > 0) lastAnomIdx = i;
+  }
+  const trailingCleanSteps =
+    lastAnomIdx >= 0 ? turnSteps.length - 1 - lastAnomIdx : turnSteps.length;
+  const tailVerifiedPass =
+    lastAnomIdx >= 0 &&
+    turnSteps
+      .slice(lastAnomIdx + 1)
+      .some((s) => Boolean(s?.healthSignals?.cleanVerifyPass));
 
   for (const st of turnSteps) {
     const hs = st.healthSignals || {};
@@ -135,8 +152,12 @@ function ihBuildTurnDiagnosis({
         f.highRepeat ||
         f.workerFault
     );
-    if (hasStepAnomaly && anchorStepIndex === null) {
-      anchorStepIndex = st.stepIndex;
+    if (hasStepAnomaly) {
+      const w = f.stepPoints || 0;
+      if (anchorStepIndex === null || w > bestAnchorScore) {
+        anchorStepIndex = st.stepIndex;
+        bestAnchorScore = w;
+      }
     }
 
     if (f.upstreamFault) {
@@ -146,6 +167,8 @@ function ihBuildTurnDiagnosis({
     if (f.replicaDrift) {
       infraCount += 1;
       driftCount += 1;
+      if (f.replicaDrift.kind === 'cold_zero') zeroCacheCount += 1;
+      else partialDriftCount += 1;
     }
     if (f.zeroThinking) zeroThinkCount += 1;
     if (f.burstUnderthinking) burstThinkCount += 1;
@@ -156,35 +179,111 @@ function ihBuildTurnDiagnosis({
     if (f.highRepeat) hasHighRepeat = true;
     if (f.workerFault) hasExecWorkerFault = true;
 
-    if (f.proof && reasons.length < 3) {
-      reasons.push(`#${st.stepIndex} ${f.proof}`);
+    if (f.proof) {
+      candidateReasons.push({
+        ord: candidateReasons.length,
+        text: `#${st.stepIndex} ${f.proof}`,
+        weight: f.stepPoints || 0,
+      });
     }
   }
+
+  candidateReasons.sort((a, b) => b.weight - a.weight || a.ord - b.ord);
+  const reasons = candidateReasons.slice(0, 3).map((r) => r.text);
 
   if (anchorStepIndex === null) {
     anchorStepIndex = turnSteps[0]?.stepIndex ?? null;
   }
 
-  const dInfra = Math.min(36, infraCount > 0 ? 18 + 8 * (infraCount - 1) : 0);
+  const hasCleanTailRecovery =
+    turnSteps.length >= 3 &&
+    trailingCleanSteps >= 2 &&
+    !userRejectedTurn &&
+    !confirmedRollback;
+
+  let dInfra = 0;
+  if (
+    infraCount === 1 &&
+    upstreamCount === 0 &&
+    zeroThinkCount === 0 &&
+    burstThinkCount === 0 &&
+    editFaultCount === 0 &&
+    toolFaultCount === 0 &&
+    !hasThrashing &&
+    amnesiaReadCount === 0
+  ) {
+    if (hasCleanTailRecovery) {
+      dInfra = 8;
+    } else if (zeroCacheCount === 1 && trailingCleanSteps === 0) {
+      dInfra = 34;
+    } else {
+      dInfra = 16;
+    }
+  } else if (infraCount > 0) {
+    dInfra = Math.min(40, 24 + 10 * (infraCount - 1) + (zeroCacheCount >= 2 ? 6 : 0));
+    if (
+      hasCleanTailRecovery &&
+      zeroThinkCount === 0 &&
+      editFaultCount === 0 &&
+      toolFaultCount === 0 &&
+      infraCount <= 2
+    ) {
+      dInfra = Math.min(dInfra, 18);
+    }
+  }
+
   let dThink = 0;
   if (zeroThinkCount > 0 || burstThinkCount > 0) {
-    const baseThinkPenalty = zeroThinkCount > 0 ? 22 : 18;
-    const compoundBoost = dInfra > 0 ? 7 : 0;
+    const baseThinkPenalty = zeroThinkCount > 0 ? 24 : 18;
+    const compoundBoost = infraCount > 0 ? 10 : 0;
     dThink = Math.min(
-      30,
+      36,
       baseThinkPenalty + compoundBoost + Math.max(0, zeroThinkCount + burstThinkCount - 1) * 6
     );
+    if (hasCleanTailRecovery && tailVerifiedPass && infraCount === 0) {
+      dThink = Math.round(dThink * 0.55);
+    }
   }
-  const dFault = Math.min(
-    46,
-    (editFaultCount > 0 ? 22 + 16 * (editFaultCount - 1) : 0) + toolFaultCount * 16
-  );
-  const dRot = Math.min(
-    36,
-    (amnesiaReadCount > 0 ? 16 + 12 * (amnesiaReadCount - 1) : 0) +
-      (hasThrashing ? (maxCtxInTurn >= 140000 ? 22 : 15) : 0) +
-      (hasHighRepeat ? 24 : 0)
-  );
+
+  let dFault = 0;
+  if (
+    editFaultCount === 1 &&
+    toolFaultCount === 0 &&
+    amnesiaReadCount === 0 &&
+    !hasExecWorkerFault &&
+    trailingCleanSteps >= 1 &&
+    !userRejectedTurn &&
+    !confirmedRollback
+  ) {
+    dFault = 8;
+  } else if (editFaultCount > 0 || toolFaultCount > 0) {
+    let rawFault =
+      (editFaultCount > 0 ? 20 + 14 * (editFaultCount - 1) : 0) + toolFaultCount * 16;
+    if (
+      hasCleanTailRecovery &&
+      tailVerifiedPass &&
+      editFaultCount + toolFaultCount <= 2 &&
+      !hasExecWorkerFault
+    ) {
+      rawFault = Math.round(rawFault * 0.5);
+    }
+    dFault = Math.min(46, rawFault);
+  }
+
+  const amnesiaPts =
+    amnesiaReadCount === 0
+      ? 0
+      : amnesiaReadCount === 1 && editFaultCount === 0 && !hasThrashing && hasCleanTailRecovery
+        ? 10
+        : 18 + 12 * (amnesiaReadCount - 1);
+  const thrashPts = !hasThrashing
+    ? 0
+    : hasCleanTailRecovery && tailVerifiedPass
+      ? 18
+      : maxCtxInTurn >= 140000
+        ? 36
+        : 34;
+  const dRot = Math.min(38, amnesiaPts + thrashPts + (hasHighRepeat ? 28 : 0));
 
   let score = Math.max(5, 100 - (dInfra + dThink + dFault + dRot));
   if (confirmedRollback) {
@@ -238,6 +337,11 @@ function ihBuildTurnDiagnosis({
   let badge = '执行循环';
   let title = '本轮工具执行连续失误';
   let summary = '单轮内出现多次编辑对齐失败或内联命令语法报错，建议停止继续试错并重新核对准确行号。';
+  if (category === 'tool_fault_loop' && hasThrashing && dFault === 0) {
+    badge = '反复返工';
+    title = '同一代码区域连续推翻改写';
+    summary = '单轮内针对同一代码片段连续多次覆写或来回回退，建议先停下核清边界条件后再一次性修改。';
+  }
   let primaryAction = {
     kind: 'copy',
     label: `复制 ${stepRef} 止损指令`,
@@ -281,19 +385,54 @@ function ihBuildTurnDiagnosis({
       toast: '已复制重审指令',
     };
   } else if (category === 'replica_drift') {
-    badge = '副本漂移';
-    title =
-      upstreamCount > 0 && driftCount === 0
-        ? '上游超时重连后推理质量下滑'
-        : '服务端切流/缓存倒退引发质量下滑';
-    summary =
-      '检测到短时前缀缓存异常或上游流中断重连，随后思考深度/产出质量显著偏离基线，建议从断点回退重做。';
-    primaryAction = {
-      kind: 'copy',
-      label: `复制 ${stepRef} 回退指令`,
-      copyText: `我需要打断当前做法：从 ${stepRef} 步开始出现异常，请先回退或核对 ${stepRef} 之前的正确状态，再按原目标重新执行。`,
-      toast: '已复制回退指令',
-    };
+    if (zeroCacheCount > 0 && partialDriftCount === 0) {
+      badge = '缓存清零';
+      if (dThink === 0 && dFault === 0 && upstreamCount === 0) {
+        title =
+          zeroCacheCount >= 2
+            ? '本轮前缀缓存连续清零（重复全量计费）'
+            : '前缀缓存意外清零（触发冷预填充）';
+        summary =
+          '短间隔内服务端前缀缓存跌至 0%，导致首字变慢与输入全量计费；当前推理质量未见异常，若连续清零建议检查代理会话保持或稍候再发。';
+        primaryAction = {
+          kind: 'jump_step',
+          label: `定位 ${stepRef}`,
+          stepIndex: anchorStepIndex,
+          agentId,
+        };
+        secondaryAction = {
+          kind: 'copy',
+          label: '复制稳态续写提示',
+          copyText:
+            '请继续当前任务，修改同一文件时尽量合并相邻块以降低重复预填充开销。',
+          toast: '已复制提示',
+        };
+      } else {
+        title = '缓存清零伴随推理质量下滑';
+        summary =
+          '检测到短时前缀缓存跌至 0% 且思考深度/工具执行质量同步下滑，建议先核对或从断点回退重做。';
+        primaryAction = {
+          kind: 'copy',
+          label: `复制 ${stepRef} 回退指令`,
+          copyText: `我需要打断当前做法：从 ${stepRef} 步开始出现异常，请先回退或核对 ${stepRef} 之前的正确状态，再按原目标重新执行。`,
+          toast: '已复制回退指令',
+        };
+      }
+    } else {
+      badge = '副本漂移';
+      title =
+        upstreamCount > 0 && driftCount === 0
+          ? '上游超时重连后推理质量下滑'
+          : '服务端切流/缓存倒退引发质量下滑';
+      summary =
+        '检测到短时前缀缓存异常或上游流中断重连，随后思考深度/产出质量显著偏离基线，建议从断点回退重做。';
+      primaryAction = {
+        kind: 'copy',
+        label: `复制 ${stepRef} 回退指令`,
+        copyText: `我需要打断当前做法：从 ${stepRef} 步开始出现异常，请先回退或核对 ${stepRef} 之前的正确状态，再按原目标重新执行。`,
+        toast: '已复制回退指令',
+      };
+    }
   } else if (category === 'thinking_throttled') {
     badge = '思考坍缩';
     title = '本轮思考深度显著低于基线';
@@ -369,6 +508,7 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
       st.stepHealthBadge = '';
       st.stepHealthDetail = '';
       st.isCacheAnomaly = false;
+      st.cacheZeroReason = st.cacheReadTokens === 0 ? 'compaction' : '';
       continue;
     }
 
@@ -382,6 +522,7 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
 
     const upstreamFault = (hs.upstreamErrorCount || 0) > 0 || (hs.retryCount || 0) > 0;
     let replicaDrift = null;
+    st.cacheZeroReason = '';
     if (
       prevNonCompact &&
       st.modelKey === prevNonCompact.modelKey &&
@@ -390,35 +531,72 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
       prevNonCompact.createdAtMs > 0 &&
       st.createdAtMs >= prevNonCompact.createdAtMs
     ) {
-      const dtSec = (st.createdAtMs - prevNonCompact.createdAtMs) / 1000;
-      if (dtSec < IH_REPLICA_DT_MAX_SEC && prevNonCompact.cacheReadTokens >= IH_REPLICA_PREV_CACHE_MIN) {
+      const prevFinishMs =
+        prevNonCompact.createdAtMs +
+        Math.max(0, Number(prevNonCompact.totalDurationSec || 0) * 1000);
+      const idleSec =
+        st.createdAtMs >= prevFinishMs
+          ? Math.max(0, (st.createdAtMs - prevFinishMs) / 1000)
+          : Math.max(0, (st.createdAtMs - prevNonCompact.createdAtMs) / 1000);
+      if (idleSec < IH_CACHE_TTL_MAX_SEC) {
         if (
+          st.cacheReadTokens === 0 &&
+          prevNonCompact.cacheReadTokens >= IH_CACHE_ZERO_PREV_MIN &&
+          st.inputTokens >= Math.max(10000, prevNonCompact.cacheReadTokens * 0.6)
+        ) {
+          replicaDrift = {
+            kind: 'cold_zero',
+            dtSec: Math.round(idleSec),
+            lostTokens: prevNonCompact.cacheReadTokens,
+          };
+        } else if (
           st.cacheReadTokens > 0 &&
+          prevNonCompact.cacheReadTokens >= IH_REPLICA_PREV_CACHE_MIN &&
           prevNonCompact.cacheReadTokens - st.cacheReadTokens >= 4096
         ) {
           replicaDrift = {
             kind: 'prefix_rewind',
-            dtSec: Math.round(dtSec),
+            dtSec: Math.round(idleSec),
             lostTokens: prevNonCompact.cacheReadTokens - st.cacheReadTokens,
           };
         } else if (
+          st.cacheReadTokens > 0 &&
+          prevNonCompact.cacheReadTokens >= IH_REPLICA_PREV_CACHE_MIN &&
           st.cacheReadTokens < prevNonCompact.cacheReadTokens * 0.2 &&
           st.inputTokens >= prevNonCompact.cacheReadTokens * 0.65
         ) {
           replicaDrift = {
             kind: 'cold_spill',
-            dtSec: Math.round(dtSec),
+            dtSec: Math.round(idleSec),
             lostTokens: Math.max(0, prevNonCompact.cacheReadTokens - st.cacheReadTokens),
           };
         }
+      } else if (
+        st.cacheReadTokens === 0 &&
+        prevNonCompact.cacheReadTokens >= IH_CACHE_ZERO_PREV_MIN
+      ) {
+        st.cacheZeroReason = 'ttl_expired';
       }
+    } else if (st.cacheReadTokens === 0) {
+      st.cacheZeroReason = hs.justSwitchedExecPhase
+        ? 'phase_switch'
+        : prevNonCompact && st.modelKey !== prevNonCompact.modelKey
+          ? 'model_switch'
+          : 'cold_start';
+    }
+    if (!replicaDrift && st.cacheReadTokens === 0 && !st.cacheZeroReason) {
+      st.cacheZeroReason = prevNonCompact ? 'low_prefix' : 'cold_start';
     }
 
     let zeroThinking = false;
     let burstUnderthinking = false;
     if (!isWorker && baseline.demonstratesThinking) {
+      const qualifiesZeroCheck =
+        (hs.isCodeEditStep && st.outputTokens >= 500) ||
+        st.outputTokens >= 1200 ||
+        ((Boolean(replicaDrift) || upstreamFault) && st.outputTokens >= 600);
       if (
-        (hs.isMutationStep || st.outputTokens >= 600) &&
+        qualifiesZeroCheck &&
         st.thinkingTokens === 0 &&
         !hs.hasThinkingText &&
         (st.thinkingDurationSec || 0) < 0.35
@@ -438,7 +616,7 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
         const unsplitBurstAfterInfra =
           st.thinkingTokens === 0 &&
           st.outputTokens >= 4500 &&
-          (Boolean(replicaDrift) || upstreamFault || (hs.maxSameFileTurnEdits || 0) >= 2);
+          (Boolean(replicaDrift) || upstreamFault || (hs.sameRegionReworkCount || 0) >= 2);
         if (shareLow || durLow || unsplitBurstAfterInfra) {
           burstUnderthinking = true;
         }
@@ -448,7 +626,9 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
     const editFaultCount = hs.editFaultCount || 0;
     const toolFaultCount = hs.toolFaultCount || 0;
     const amnesiaReadCount = hs.amnesiaReadCount || 0;
-    const thrashingEdits = (hs.maxSameFileTurnEdits || 0) >= 4;
+    const sameRegionReworkCount = hs.sameRegionReworkCount || 0;
+    const oscillationRevertCount = hs.oscillationRevertCount || 0;
+    const thrashingEdits = sameRegionReworkCount >= 3 || oscillationRevertCount >= 2;
     const highRepeat = (hs.outputRepeatRatio || 0) >= 0.55;
     const workerFault = isWorker && (editFaultCount > 0 || toolFaultCount > 0);
 
@@ -462,9 +642,11 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
     }
     if (replicaDrift) {
       proofParts.push(
-        replicaDrift.kind === 'prefix_rewind'
-          ? `${replicaDrift.dtSec}s 内缓存倒退 ${ihFormatCompactTok(replicaDrift.lostTokens)} tok`
-          : `${replicaDrift.dtSec}s 内热缓存丢失 ${ihFormatCompactTok(replicaDrift.lostTokens)} tok`
+        replicaDrift.kind === 'cold_zero'
+          ? `${replicaDrift.dtSec}s 内热缓存清零（丢失 ${ihFormatCompactTok(replicaDrift.lostTokens)} tok）`
+          : replicaDrift.kind === 'prefix_rewind'
+            ? `${replicaDrift.dtSec}s 内缓存倒退 ${ihFormatCompactTok(replicaDrift.lostTokens)} tok`
+            : `${replicaDrift.dtSec}s 内热缓存骤降 ${ihFormatCompactTok(replicaDrift.lostTokens)} tok`
       );
     }
     if (zeroThinking) {
@@ -482,7 +664,11 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
       proofParts.push(`短窗重复重读未改文件 ${amnesiaReadCount} 次`);
     }
     if (thrashingEdits) {
-      proofParts.push(`同文件单轮连续返工 ${hs.maxSameFileTurnEdits} 次`);
+      proofParts.push(
+        oscillationRevertCount >= 2
+          ? '同位置代码来回反复回退改写'
+          : `同区域代码连续推翻改写 ${sameRegionReworkCount} 次`
+      );
     }
     if (highRepeat) {
       proofParts.push(`输出高度复读 (${Math.round((hs.outputRepeatRatio || 0) * 100)}%)`);
@@ -493,18 +679,21 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
 
     const stepPoints =
       (upstreamFault ? 18 : 0) +
-      (replicaDrift ? 18 : 0) +
-      (zeroThinking || burstUnderthinking ? 20 : 0) +
-      editFaultCount * 22 +
+      (replicaDrift ? (replicaDrift.kind === 'cold_zero' ? 24 : 18) : 0) +
+      (zeroThinking || burstUnderthinking ? 22 : 0) +
+      editFaultCount * 20 +
       toolFaultCount * 16 +
-      amnesiaReadCount * 16 +
-      (highRepeat ? 24 : 0);
+      amnesiaReadCount * 18 +
+      (thrashingEdits ? 22 : 0) +
+      (highRepeat ? 26 : 0);
 
     let stepBadge = '';
-    if (replicaDrift) stepBadge = '切流';
+    if (replicaDrift?.kind === 'cold_zero') stepBadge = '清零';
+    else if (replicaDrift) stepBadge = '切流';
     else if (upstreamFault) stepBadge = '超时';
     else if (editFaultCount > 0 || toolFaultCount > 0) stepBadge = '失误';
-    else if (amnesiaReadCount > 0 || thrashingEdits) stepBadge = '重读';
+    else if (thrashingEdits) stepBadge = '返工';
+    else if (amnesiaReadCount > 0) stepBadge = '重读';
     else if (zeroThinking || burstUnderthinking) stepBadge = '缩水';
     else if (highRepeat) stepBadge = '复读';
 
@@ -573,7 +762,11 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
       st.turnHealthLevel = diag.level;
       if (diag.level === 'warn' || diag.level === 'critical') {
         const sf = stepFindingsMap.get(st);
-        if (sf && (sf.stepPoints > 0 || (st.healthSignals?.confirmedRollback && st.stepIndex === diag.anchorStepIndex))) {
+        if (
+          sf &&
+          (sf.stepPoints >= 18 ||
+            (st.healthSignals?.confirmedRollback && st.stepIndex === diag.anchorStepIndex))
+        ) {
           if (st.stepHealthLevel === 'healthy' || st.stepHealthLevel === 'notice') {
             st.stepHealthLevel = 'warn';
           }
@@ -598,9 +791,14 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
       ? latestDiag
       : null;
 
-  const totalScore = turnDiagnoses.reduce((acc, d) => acc + d.score, 0);
-  const sessionScore =
-    turnDiagnoses.length > 0 ? Math.round(totalScore / turnDiagnoses.length) : 100;
+  let weightedSum = 0;
+  let weightTotal = 0;
+  for (let i = 0; i < turnDiagnoses.length; i++) {
+    const w = Math.pow(0.82, turnDiagnoses.length - 1 - i);
+    weightedSum += turnDiagnoses[i].score * w;
+    weightTotal += w;
+  }
+  const sessionScore = weightTotal > 0 ? Math.round(weightedSum / weightTotal) : 100;
 
   return {
     sessionScore,

@@ -3022,32 +3022,65 @@ input {
 }
 
 .steps-data-table .dur-main {
+  display: block;
   font-size: 11px;
+  line-height: 1.2;
   color: var(--text-primary);
 }
 
 .steps-data-table .dur-sub-ttft {
   display: none;
-  font-size: 9.5px;
-  line-height: 1.2;
+  margin-top: 1.5px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
-@container steps-table (max-width: 496px) {
+.steps-data-table .col-ttft.is-ttft-slow,
+.steps-data-table .dur-sub-ttft.is-ttft-slow {
+  color: var(--metric-warn);
+  font-weight: 600;
+}
+
+.steps-data-table .dur-sub-ttft.is-ttft-slow {
+  padding: 0 3.5px;
+  border-radius: var(--radius-xs);
+  background: var(--metric-warn-soft);
+}
+
+.steps-data-table .col-ttft.is-ttft-stall,
+.steps-data-table .dur-sub-ttft.is-ttft-stall {
+  color: var(--metric-danger);
+  font-weight: 700;
+}
+
+.steps-data-table .dur-sub-ttft.is-ttft-stall {
+  padding: 0 3.5px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--metric-danger) 13%, transparent);
+}
+
+@container steps-table (max-width: 540px) {
   .steps-data-table.has-subagents .col-ttft {
     display: none;
   }
   .steps-data-table.has-subagents .dur-sub-ttft:not([hidden]) {
-    display: block;
+    display: inline-block;
   }
 }
 
-@container steps-table (max-width: 462px) {
+@container steps-table (max-width: 500px) {
   .steps-data-table .col-ttft {
     display: none;
   }
   .steps-data-table .dur-sub-ttft:not([hidden]) {
-    display: block;
+    display: inline-block;
   }
+}
+
+@container steps-table (max-width: 462px) {
   .steps-data-table th,
   .steps-data-table td {
     padding: 5px 2.5px;
@@ -3326,6 +3359,11 @@ input {
 .col-cache.tone-warn {
   color: var(--metric-warn);
   font-weight: 600;
+}
+
+.col-cache.tone-danger {
+  color: var(--metric-danger);
+  font-weight: 700;
 }
 
 .turn-rail-dot.is-anomaly-dot {

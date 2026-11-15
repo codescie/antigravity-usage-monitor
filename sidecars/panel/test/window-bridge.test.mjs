@@ -1479,7 +1479,7 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
             modelKey: 'MODEL_PLACEHOLDER_M429',
             modelShort: 'gemini-4-carbon',
             tokPerSec: 65,
-            ttftSec: 1.5,
+            ttftSec: 8.4,
             totalDurationSec: 12,
             isComplete: true,
             contextTokens: 264000,
@@ -1537,8 +1537,11 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
     assert.equal(stepsBody2.children[0].querySelector('.step-cell').querySelector('.step-health-tag'), null, 'Step health badge moved out of step-cell');
     assert.equal(stepsBody2.children[0].querySelector('.col-model').querySelector('.step-health-tag').textContent, '切流');
     assert.equal(stepsBody2.children[0].querySelector('.col-model').querySelector('.model-cell-name').textContent, 'gemini-4-carbon');
+    assert.equal(stepsBody2.children[0].querySelector('.col-speed').children[0].textContent, '120.5 t/s');
     assert.equal(stepsBody2.children[0].querySelector('.col-ctx').textContent, '274.0k/+6200');
     assert.equal(stepsBody2.children[1].querySelector('.col-ctx').textContent, '264.0k/+13.9k');
+    assert.equal(stepsBody2.children[1].querySelector('.dur-sub-ttft').textContent, '首 8.4s');
+    assert.equal(stepsBody2.children[1].querySelector('.dur-sub-ttft').classList.contains('is-ttft-slow'), true);
     assert.match(stylesCss, /\.steps-data-table\s+td\.model-cell[\s\S]*?max-width:\s*0/, 'Compiled styles.css guards model-cell width squeeze');
     assert.match(stylesCss, /\.steps-data-table\s+\.col-cost[\s\S]*?padding-right:\s*10px/, 'Compiled styles.css preserves 10px right padding on col-cost');
     assert.equal(stylesCss.includes('.turn-rail.tone-warn'), false, 'Compiled styles.css drops full-turn orange rail painting');

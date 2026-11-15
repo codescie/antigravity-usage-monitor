@@ -637,6 +637,24 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     return parts.slice(-3).join('/') || cleaned;
   };
 
+  const ihExtractDistinctiveLines = (snippet) => {
+    const set = new Set();
+    if (typeof snippet !== 'string' || !snippet.trim()) return set;
+    const lines = snippet.slice(0, 4096).split(/\r?\n/);
+    for (const rawLine of lines) {
+      const norm = rawLine.trim().replace(/\s+/g, ' ');
+      if (
+        norm.length >= 10 &&
+        /[a-zA-Z0-9_\u4e00-\u9fa5]/.test(norm) &&
+        !/^[{}()[\];,]+$/.test(norm)
+      ) {
+        set.add(norm);
+        if (set.size >= 40) break;
+      }
+    }
+    return set;
+  };
+
   const ihComputeFourGramRepeatRatio = (text) => {
     if (typeof text !== 'string' || text.length < 320) return 0;
     const bounded = text.slice(0, 8192);
@@ -747,15 +765,62 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     const cmd = pick(['CommandLine', 'Command', 'command']);
     const startRaw = Number(pick(['StartLine', 'startLine']));
     const endRaw = Number(pick(['EndLine', 'endLine']));
-    const startLine = Number.isInteger(startRaw) && startRaw > 0 ? startRaw : 1;
-    const endLine =
-      Number.isInteger(endRaw) && endRaw >= startLine ? endRaw : startLine + 799;
+    const hasExplicitStartLine = Number.isInteger(startRaw) && startRaw > 0;
+    const hasExplicitEndLine =
+      Number.isInteger(endRaw) && endRaw >= (hasExplicitStartLine ? startRaw : 1);
+    const startLine = hasExplicitStartLine ? startRaw : 1;
+    const endLine = hasExplicitEndLine ? endRaw : startLine + 799;
+
+    let targetText = pick(['Target', 'TargetContent', 'old_string', 'OldString']);
+    let replacementText = pick(['Replacement', 'ReplacementContent', 'new_string', 'NewString']);
+    const chunks =
+      args?.ReplacementChunks ??
+      args?.replacementChunks ??
+      stepPayload?.ReplacementChunks ??
+      stepPayload?.replacementChunks;
+    if (Array.isArray(chunks) && chunks.length > 0) {
+      const tParts = [];
+      const rParts = [];
+      for (const ch of chunks) {
+        const tc = unwrapArgString(ch?.TargetContent ?? ch?.targetContent ?? ch?.Target);
+        const rc = unwrapArgString(
+          ch?.ReplacementContent ?? ch?.replacementContent ?? ch?.Replacement
+        );
+        if (tc) tParts.push(tc);
+        if (rc) rParts.push(rc);
+      }
+      if (!targetText && tParts.length > 0) targetText = tParts.join('\n').slice(0, 4096);
+      if (!replacementText && rParts.length > 0) replacementText = rParts.join('\n').slice(0, 4096);
+    }
+
+    let editSpan = null;
+    const resStr = String(fallbackStep?.content || '');
+    const mLine = resStr.match(
+      /starting at line (\d+)(?:\s*\(([+-]?\d+)\/([+-]?\d+)\s*lines?\))?/i
+    );
+    if (mLine) {
+      const ls = Number(mLine[1]);
+      if (Number.isInteger(ls) && ls > 0) {
+        const spanLen = Math.max(
+          2,
+          Math.abs(Number(mLine[2] || 0)),
+          Math.abs(Number(mLine[3] || 0))
+        );
+        editSpan = { start: ls, end: ls + spanLen };
+      }
+    } else if (hasExplicitStartLine) {
+      editSpan = { start: startLine, end: hasExplicitEndLine ? endLine : startLine + 4 };
+    }
+
     return {
       nameLower: info.toolName,
       normPath: ihNormalizeFileKey(rawPath),
       startLine,
       endLine,
       cmd,
+      editSpan,
+      targetLines: ihExtractDistinctiveLines(targetText),
+      replacementLines: ihExtractDistinctiveLines(replacementText),
     };
   };
 
@@ -765,7 +830,7 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
   let justSwitchedExecPhase = false;
   const fileVersionMap = new Map();
   const fileReadsMap = new Map();
-  const turnFileEditsMap = new Map();
+  const turnFileEditHistoryMap = new Map();
   let awaitingRollbackConfirmForTurn = null;
   let rollbackLookaheadRemaining = 0;
 
@@ -806,11 +871,12 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
   rawSteps.forEach((s, index) => {
     if (isCheckpointStep(s)) {
       fileReadsMap.clear();
+      turnFileEditHistoryMap.clear();
     }
 
     if (isUserTurnBoundary(s)) {
       const promptText = extractUserTurnPrompt(s);
-      turnFileEditsMap.clear();
+      turnFileEditHistoryMap.clear();
       inExecutionPhase = false;
       justSwitchedExecPhase = false;
       if (activeTurnIndex !== null && ihIsUserRejectionPrompt(promptText)) {
@@ -1026,7 +1092,10 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     let editFaultCount = 0;
     let toolFaultCount = 0;
     let amnesiaReadCount = 0;
-    let maxSameFileTurnEdits = 0;
+    let sameRegionReworkCount = 0;
+    let oscillationRevertCount = 0;
+    let cleanVerifyPass = false;
+    let isCodeEditStep = false;
     let isMutationStep = false;
     let triggersExecPhaseNext = false;
     let exitsExecPhaseNow = false;
@@ -1049,12 +1118,19 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
           const prevReads = fileReadsMap.get(meta.normPath) || [];
           const reqLen = Math.max(1, meta.endLine - meta.startLine + 1);
           const isAmnesiaDup = prevReads.some((pr) => {
-            if (pr.version !== curVer || currentResultOrd - pr.stepOrd > 10) return false;
+            if (
+              pr.version !== curVer ||
+              currentResultOrd <= pr.stepOrd ||
+              currentResultOrd - pr.stepOrd > 8
+            ) {
+              return false;
+            }
             const overlap = Math.max(
               0,
               Math.min(meta.endLine, pr.end) - Math.max(meta.startLine, pr.start) + 1
             );
-            return overlap / reqLen >= 0.6;
+            const prSpanLen = Math.max(1, pr.end - pr.start + 1);
+            return overlap / Math.max(reqLen, prSpanLen * 0.5) >= 0.6;
           });
           if (isAmnesiaDup) {
             amnesiaReadCount += 1;
@@ -1074,19 +1150,68 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
         tName === 'multi_replace_file_content' ||
         tName === 'edit_notebook'
       ) {
+        isCodeEditStep = true;
         isMutationStep = true;
         editAttemptCount += 1;
         if (child && ihIsEditToolFailure(child)) {
           editFaultCount += 1;
         } else if (meta.normPath) {
           fileVersionMap.set(meta.normPath, (fileVersionMap.get(meta.normPath) || 0) + 1);
-          const nextTurnEdits = (turnFileEditsMap.get(meta.normPath) || 0) + 1;
-          turnFileEditsMap.set(meta.normPath, nextTurnEdits);
-          if (nextTurnEdits > maxSameFileTurnEdits) {
-            maxSameFileTurnEdits = nextTurnEdits;
+          const history = turnFileEditHistoryMap.get(meta.normPath) || [];
+          const priorStepEdits = history.filter((h) => h.stepOrd < currentResultOrd);
+          const matchingPriors = [];
+          let stepRevertedPrior = false;
+          for (const prev of priorStepEdits) {
+            const hasCodeInfo = meta.targetLines.size > 0 && prev.replacementLines.size > 0;
+            let overwritesOwnCode = false;
+            for (const ln of meta.targetLines) {
+              if (prev.replacementLines.has(ln)) {
+                overwritesOwnCode = true;
+                break;
+              }
+            }
+            let revertsPriorTarget = false;
+            if (meta.replacementLines.size > 0 && prev.targetLines.size > 0) {
+              for (const ln of meta.replacementLines) {
+                if (prev.targetLines.has(ln) && !prev.replacementLines.has(ln)) {
+                  revertsPriorTarget = true;
+                  break;
+                }
+              }
+            }
+            const spanOverlaps = Boolean(
+              meta.editSpan &&
+                prev.span &&
+                meta.editSpan.start <= prev.span.end + (hasCodeInfo ? 0 : 2) &&
+                meta.editSpan.end >= prev.span.start - (hasCodeInfo ? 0 : 2)
+            );
+            if (overwritesOwnCode || revertsPriorTarget || (!hasCodeInfo && spanOverlaps)) {
+              matchingPriors.push(prev);
+              if (revertsPriorTarget) stepRevertedPrior = true;
+            }
           }
+          const reworkDepth =
+            matchingPriors.length > 0
+              ? Math.max(...matchingPriors.map((p) => p.reworkDepth || 0)) + 1
+              : 0;
+          if (reworkDepth > sameRegionReworkCount) {
+            sameRegionReworkCount = reworkDepth;
+          }
+          if (stepRevertedPrior) {
+            oscillationRevertCount += 1;
+          }
+          history.push({
+            stepOrd: currentResultOrd,
+            span: meta.editSpan,
+            targetLines: meta.targetLines,
+            replacementLines: meta.replacementLines,
+            reworkDepth,
+          });
+          if (history.length > 24) history.shift();
+          turnFileEditHistoryMap.set(meta.normPath, history);
         }
       } else if (tName === 'write_file' || tName === 'write_to_file') {
+        isCodeEditStep = true;
         isMutationStep = true;
         if (meta.normPath) {
           fileVersionMap.set(meta.normPath, (fileVersionMap.get(meta.normPath) || 0) + 1);
@@ -1094,8 +1219,16 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       } else if (tName === 'run_command') {
         isMutationStep = true;
         const resultStr = String(child?.content || child?.error || '');
+        const childStatusUpper = String(child?.status || '').toUpperCase();
         if (!ihIsTestRunnerCommand(meta.cmd) && ihIsInlineScriptCrash(meta.cmd, resultStr)) {
           toolFaultCount += 1;
+        } else if (
+          (ihIsTestRunnerCommand(meta.cmd) || /\bnpm\s+run\s+build\b/i.test(meta.cmd)) &&
+          !childStatusUpper.includes('ERROR') &&
+          !child?.error &&
+          !/\b(?:FAIL|ERR!|TEST_EXIT=[1-9])\b/.test(resultStr)
+        ) {
+          cleanVerifyPass = true;
         }
         if (
           awaitingRollbackConfirmForTurn !== null &&
@@ -1132,7 +1265,11 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       editFaultCount,
       toolFaultCount,
       amnesiaReadCount,
-      maxSameFileTurnEdits,
+      sameRegionReworkCount,
+      oscillationRevertCount,
+      maxSameFileTurnEdits: sameRegionReworkCount,
+      cleanVerifyPass,
+      isCodeEditStep,
       isMutationStep,
       inExecutionPhase: stepInExecutionPhase,
       justSwitchedExecPhase,

@@ -169,7 +169,9 @@ export const StepsDetailView = defineComponent({
       const st = item?.st || {};
       const diag = item?.turnDiag || null;
       const isAnomalousStep =
-        st.stepHealthLevel === 'warn' || st.stepHealthLevel === 'critical';
+        st.stepHealthLevel === 'warn' ||
+        st.stepHealthLevel === 'critical' ||
+        Boolean(st.isCacheAnomaly);
       const isAnomalousTurn =
         diag && (diag.level === 'warn' || diag.level === 'critical');
       const reasonText =
@@ -521,7 +523,7 @@ export const StepsDetailView = defineComponent({
 
           const tdTtft = h('td', { className: 'col-ttft text-muted' });
           const durMain = h('span', { className: 'dur-main cell-value' });
-          const durSubTtft = h('div', { className: 'dur-sub-ttft text-muted', hidden: true });
+          const durSubTtft = h('div', { className: 'dur-sub-ttft', hidden: true });
           const tdDur = h('td', { className: 'col-dur' }, [durMain, durSubTtft]);
           const tdCtx = h('td', { className: 'col-ctx' });
           const tdCache = h('td', {
@@ -544,6 +546,7 @@ export const StepsDetailView = defineComponent({
               stepHealthTagEl,
               tdModel,
               modelNameEl,
+              tdSpeed,
               speedMain,
               speedReason,
               tdTtft,
@@ -632,7 +635,9 @@ export const StepsDetailView = defineComponent({
           });
           const showBadgeTag =
             Boolean(st.stepHealthBadge) &&
-            (st.stepHealthLevel === 'warn' || st.stepHealthLevel === 'critical');
+            (st.stepHealthLevel === 'warn' ||
+              st.stepHealthLevel === 'critical' ||
+              Boolean(st.isCacheAnomaly));
           patchAttr(refs.stepHealthTagEl, 'hidden', !showBadgeTag);
           if (showBadgeTag) {
             patchText(refs.stepHealthTagEl, st.stepHealthBadge);
@@ -658,16 +663,34 @@ export const StepsDetailView = defineComponent({
             refs.tdModel.onmouseleave = null;
           }
 
-          patchText(refs.speedMain, formatMetric(st.tokPerSec, ' tok/s'));
+          patchText(refs.speedMain, formatMetric(st.tokPerSec, ' t/s'));
+          patchAttr(
+            refs.tdSpeed,
+            'title',
+            Number.isFinite(st.tokPerSec) ? `输出吞吐 ${st.tokPerSec.toFixed(1)} tokens/s` : false
+          );
           const reason = speedReasonText(st.selectedSpeedReason);
           patchText(refs.speedReason, reason);
           patchAttr(refs.speedReason, 'hidden', !reason);
 
+          const ttftNum = Number(st.ttftSec);
+          const hasTtft = Number.isFinite(ttftNum);
+          const isTtftStall = hasTtft && ttftNum >= 10;
+          const isTtftSlow = hasTtft && !isTtftStall && ttftNum >= 5;
           patchText(refs.tdTtft, formatMetric(st.ttftSec, 's'));
+          patchClasses(refs.tdTtft, {
+            'text-muted': !isTtftSlow && !isTtftStall,
+            'is-ttft-slow': isTtftSlow,
+            'is-ttft-stall': isTtftStall,
+          });
           patchText(refs.durMain, formatStepDuration(st.totalDurationSec));
-          const subTtft = Number.isFinite(st.ttftSec) ? `首 ${st.ttftSec.toFixed(1)}s` : '';
+          const subTtft = hasTtft ? `首 ${ttftNum.toFixed(1)}s` : '';
           patchText(refs.durSubTtft, subTtft);
           patchAttr(refs.durSubTtft, 'hidden', !subTtft);
+          patchClasses(refs.durSubTtft, {
+            'is-ttft-slow': isTtftSlow,
+            'is-ttft-stall': isTtftStall,
+          });
           patchAttr(refs.tdDur, 'title', formatStepDurationDetail(st));
           const outNum = Number(st.outputTokens || 0);
           const outCompact = outNum >= 10000 ? formatTokens(outNum) : String(outNum);
@@ -678,13 +701,25 @@ export const StepsDetailView = defineComponent({
             'title',
             `上下文 ${formatTokens(st.contextTokens)} · 输出 +${Number(st.outputTokens || 0)} · 缓存 ${Number(st.cacheHitPct ?? 0)}%${st.stepHealthDetail ? ` · ${st.stepHealthDetail}` : ''}`
           );
-          patchText(refs.tdCache, `${Number(st.cacheHitPct ?? 0)}%`);
+          const cachePctNum = Number(st.cacheHitPct ?? 0);
+          const isZeroCacheAnom = Boolean(st.isCacheAnomaly && cachePctNum === 0);
+          patchText(refs.tdCache, `${cachePctNum}%`);
           patchClasses(refs.tdCache, {
-            'accent-ok': !st.isCacheAnomaly,
-            'tone-warn': Boolean(st.isCacheAnomaly),
+            'accent-ok': !st.isCacheAnomaly && cachePctNum > 0,
+            'text-muted': !st.isCacheAnomaly && cachePctNum === 0,
+            'tone-warn': Boolean(st.isCacheAnomaly && !isZeroCacheAnom),
+            'tone-danger': isZeroCacheAnom,
           });
           if (st.isCacheAnomaly && st.stepHealthDetail) {
             patchAttr(refs.tdCache, 'title', st.stepHealthDetail);
+          } else if (cachePctNum === 0) {
+            const benignTip =
+              st.cacheZeroReason === 'ttl_expired'
+                ? '距上步闲置 ≥5m，前缀缓存自然过期重建（正常不扣分）'
+                : st.isCompactionStep
+                  ? '上下文压缩检查点（正常重建缓存）'
+                  : '冷启动或切换模型/执行阶段（正常不扣分）';
+            patchAttr(refs.tdCache, 'title', benignTip);
           } else {
             patchAttr(refs.tdCache, 'title', false);
           }
@@ -723,7 +758,7 @@ export const StepsDetailView = defineComponent({
           patchText(refs.tdName, modelDisplay.text);
           patchAttr(refs.tdName, 'title', modelDisplay.title);
           patchText(refs.tdCalls, String(Number(m.calls || 0)));
-          patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' tok/s'));
+          patchText(refs.speedMain, formatMetric(m.avgTokPerSec, ' t/s'));
           patchText(refs.speedSub, `有效 ${sampleSummary(m.speedSummary)}`);
           patchText(refs.tdTokens, formatTokens(m.totalTokens || 0));
           patchText(refs.tdCost, formatUsd(m.costUsd || 0));

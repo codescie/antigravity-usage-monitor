@@ -352,3 +352,317 @@ test('Inference health identifies execution-worker handoff faults and confirms g
   assert.ok(rolledTurnDiag.score <= 25);
   assert.equal(diagAfterRollback.activeAlert, null, 'Healthy recovery turn clears active topbar alert');
 });
+
+test('Inference health avoids false thrashing on parallel/disjoint same-file edits and forgives recovered single glitches', async () => {
+  const mkBatchEdits = () => [
+    {
+      name: 'edit_file',
+      args: {
+        Path: '/repo/src/view.js',
+        Target: 'function renderPartA() { return 1; }',
+        Replacement: 'function renderPartA() { return 10; }',
+      },
+    },
+    {
+      name: 'edit_file',
+      args: {
+        Path: '/repo/src/view.js',
+        Target: 'function renderPartB() { return 2; }',
+        Replacement: 'function renderPartB() { return 20; }',
+      },
+    },
+    {
+      name: 'edit_file',
+      args: {
+        Path: '/repo/src/view.js',
+        Target: 'function renderPartC() { return 3; }',
+        Replacement: 'function renderPartC() { return 30; }',
+      },
+    },
+    {
+      name: 'edit_file',
+      args: {
+        Path: '/repo/src/view.js',
+        Target: 'function renderPartD() { return 4; }',
+        Replacement: 'function renderPartD() { return 40; }',
+      },
+    },
+    {
+      name: 'edit_file',
+      args: {
+        Path: '/repo/src/view.js',
+        Target: 'function renderPartE() { return 5; }',
+        Replacement: 'function renderPartE() { return 50; }',
+      },
+    },
+    {
+      name: 'edit_file',
+      args: {
+        Path: '/repo/src/view.js',
+        Target: 'function renderPartF() { return 6; }',
+        Replacement: 'function renderPartF() { return 60; }',
+      },
+    },
+  ];
+  const rawSteps = [
+    mkUserStep('在一个文件里并行修改多处并编写不同函数', '2026-01-01T04:00:00Z', 0),
+    mkPlannerStep({
+      stepIndex: 1,
+      createdAt: '2026-01-01T04:00:01Z',
+      finishedGeneratingAt: '2026-01-01T04:00:10Z',
+      cacheReadTokens: 180000,
+      inputTokens: 2000,
+      thinkingTokens: 450,
+      responseTokens: 500,
+      toolCalls: mkBatchEdits(),
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement in /repo/src/view.js starting at line 10 (+1/-1 lines)'),
+    mkToolResult('edit_file', 'Made 1 replacement in /repo/src/view.js starting at line 40 (+1/-1 lines)'),
+    mkToolResult('edit_file', 'Made 1 replacement in /repo/src/view.js starting at line 80 (+1/-1 lines)'),
+    mkToolResult('edit_file', 'Made 1 replacement in /repo/src/view.js starting at line 120 (+1/-1 lines)'),
+    mkToolResult('edit_file', 'Made 1 replacement in /repo/src/view.js starting at line 160 (+1/-1 lines)'),
+    mkToolResult('edit_file', 'Made 1 replacement in /repo/src/view.js starting at line 200 (+1/-1 lines)'),
+    // Single mid-turn partial cache dip that self-heals
+    mkPlannerStep({
+      stepIndex: 8,
+      createdAt: '2026-01-01T04:00:15Z',
+      finishedGeneratingAt: '2026-01-01T04:00:25Z',
+      cacheReadTokens: 5000,
+      inputTokens: 175000,
+      thinkingTokens: 400,
+      responseTokens: 450,
+      toolCalls: [
+        {
+          name: 'edit_file',
+          args: {
+            Path: '/repo/src/view.js',
+            Target: 'export function fnAlpha() { return "old"; }',
+            Replacement: 'export function fnAlpha() { return "new"; }',
+          },
+        },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 240 (+1/-1 lines)'),
+    // Progressive edits in different functions + 1 TDD fail & fix
+    mkPlannerStep({
+      stepIndex: 10,
+      createdAt: '2026-01-01T04:00:28Z',
+      finishedGeneratingAt: '2026-01-01T04:00:36Z',
+      cacheReadTokens: 185000,
+      inputTokens: 1500,
+      thinkingTokens: 380,
+      responseTokens: 420,
+      toolCalls: [
+        {
+          name: 'edit_file',
+          args: {
+            Path: '/repo/src/view.js',
+            Target: 'export function fnBeta() { return "old"; }',
+            Replacement: 'export function fnBeta() { return "new"; }',
+          },
+        },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 290 (+1/-1 lines)'),
+    mkPlannerStep({
+      stepIndex: 12,
+      createdAt: '2026-01-01T04:00:39Z',
+      finishedGeneratingAt: '2026-01-01T04:00:46Z',
+      cacheReadTokens: 186000,
+      inputTokens: 1400,
+      thinkingTokens: 360,
+      responseTokens: 400,
+      toolCalls: [
+        {
+          name: 'edit_file',
+          args: {
+            Path: '/repo/src/view.js',
+            Target: 'export function fnGamma() { return "old"; }',
+            Replacement: 'export function fnGamma() { return "new"; }',
+          },
+        },
+        { name: 'run_command', args: { CommandLine: 'npm test' } },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 340 (+1/-1 lines)'),
+    mkToolResult('run_command', 'AssertionError: fnGamma', 'CORTEX_STEP_STATUS_ERROR'),
+    mkPlannerStep({
+      stepIndex: 15,
+      createdAt: '2026-01-01T04:00:48Z',
+      finishedGeneratingAt: '2026-01-01T04:00:55Z',
+      cacheReadTokens: 187500,
+      inputTokens: 1200,
+      thinkingTokens: 360,
+      responseTokens: 380,
+      toolCalls: [
+        {
+          name: 'edit_file',
+          args: {
+            Path: '/repo/src/view.js',
+            Target: 'export function fnGamma() { return "new"; }',
+            Replacement: 'export function fnGamma() { return "fixed"; }',
+          },
+        },
+        { name: 'run_command', args: { CommandLine: 'npm test' } },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 340 (+1/-1 lines)'),
+    mkToolResult('run_command', 'all tests passed', 'CORTEX_STEP_STATUS_DONE'),
+  ];
+
+  const h = backendHarness({
+    trajectories: { prog1: { trajectory: { steps: rawSteps }, numTotalSteps: rawSteps.length } },
+    summaries: { prog1: { stepCount: rawSteps.length, lastModifiedTime: '2026-01-01T04:00:55Z', status: 'IDLE', annotations: { title: 'Progressive Edits' } } },
+  });
+  const payload = await h.buildTelemetryPayloadInternal('prog1');
+  const health = payload.activeConversation.inferenceHealth;
+  assert.equal(health.activeAlert, null, 'Disjoint same-file edits and self-healed single dip must not raise alert');
+  assert.equal(health.turnDiagnoses[0].level, 'healthy');
+  assert.ok(health.turnDiagnoses[0].score >= 88);
+  const dipStep = payload.activeConversation.recentSteps.find((s) => s.stepIndex === 8);
+  assert.equal(dipStep.isCacheAnomaly, true, 'Recovered cache dip remains observable on step row');
+});
+
+test('Inference health detects genuine same-region self-overwrite thrashing', () => {
+  const rawSteps = [
+    mkUserStep('修复校验逻辑', '2026-01-01T05:00:00Z', 0),
+    mkPlannerStep({
+      stepIndex: 1,
+      createdAt: '2026-01-01T05:00:01Z',
+      finishedGeneratingAt: '2026-01-01T05:00:08Z',
+      cacheReadTokens: 60000,
+      toolCalls: [
+        {
+          name: 'edit_file',
+          args: {
+            Path: '/repo/src/handler.js',
+            Target: 'const validateMode = originalCheck();',
+            Replacement: 'const validateMode = firstAttemptCheck();',
+          },
+        },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 42 (+1/-1 lines)'),
+    mkPlannerStep({
+      stepIndex: 3,
+      createdAt: '2026-01-01T05:00:10Z',
+      finishedGeneratingAt: '2026-01-01T05:00:18Z',
+      cacheReadTokens: 61000,
+      toolCalls: [
+        {
+          name: 'edit_file',
+          args: {
+            Path: '/repo/src/handler.js',
+            Target: 'const validateMode = firstAttemptCheck();',
+            Replacement: 'const validateMode = secondAttemptCheck();',
+          },
+        },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 42 (+1/-1 lines)'),
+    mkPlannerStep({
+      stepIndex: 5,
+      createdAt: '2026-01-01T05:00:20Z',
+      finishedGeneratingAt: '2026-01-01T05:00:28Z',
+      cacheReadTokens: 62000,
+      toolCalls: [
+        {
+          name: 'edit_file',
+          args: {
+            Path: '/repo/src/handler.js',
+            Target: 'const validateMode = secondAttemptCheck();',
+            Replacement: 'const validateMode = thirdAttemptCheck();',
+          },
+        },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 42 (+1/-1 lines)'),
+    mkPlannerStep({
+      stepIndex: 7,
+      createdAt: '2026-01-01T05:00:30Z',
+      finishedGeneratingAt: '2026-01-01T05:00:38Z',
+      cacheReadTokens: 63000,
+      toolCalls: [
+        {
+          name: 'edit_file',
+          args: {
+            Path: '/repo/src/handler.js',
+            Target: 'const validateMode = thirdAttemptCheck();',
+            Replacement: 'const validateMode = originalCheck();',
+          },
+        },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 42 (+1/-1 lines)'),
+  ];
+
+  const h = backendHarness();
+  const steps = extractModelSteps(rawSteps, []);
+  const diag = h.evaluateAgentInferenceHealth(steps);
+  const lastStep = steps[steps.length - 1];
+  assert.ok(lastStep.healthSignals.sameRegionReworkCount >= 3);
+  assert.equal(lastStep.stepHealthBadge, '返工');
+  assert.ok(diag.activeAlert && diag.turnDiagnoses[0].level === 'warn');
+});
+
+test('Inference health distinguishes abnormal short-idle cache zero from benign >=300s TTL expiry', () => {
+  const shortIdleSteps = extractModelSteps([
+    mkUserStep('连续检查上下文缓存', '2026-01-01T06:00:00Z', 0),
+    mkPlannerStep({
+      stepIndex: 1,
+      createdAt: '2026-01-01T06:00:00Z',
+      finishedGeneratingAt: '2026-01-01T06:00:10Z',
+      cacheReadTokens: 64000,
+      inputTokens: 1000,
+      thinkingTokens: 400,
+      responseTokens: 400,
+    }),
+    mkPlannerStep({
+      stepIndex: 2,
+      createdAt: '2026-01-01T06:00:25Z',
+      finishedGeneratingAt: '2026-01-01T06:00:35Z',
+      cacheReadTokens: 0,
+      inputTokens: 65000,
+      thinkingTokens: 400,
+      responseTokens: 400,
+    }),
+  ], []);
+
+  const h = backendHarness();
+  const coldDiag = h.evaluateAgentInferenceHealth(shortIdleSteps);
+  assert.equal(shortIdleSteps[1].stepHealthBadge, '清零');
+  assert.equal(shortIdleSteps[1].isCacheAnomaly, true);
+  assert.ok(coldDiag.activeAlert);
+  assert.equal(coldDiag.activeAlert.badge, '缓存清零');
+  assert.equal(coldDiag.activeAlert.level, 'warn');
+  assert.equal(coldDiag.activeAlert.primaryAction.kind, 'jump_step');
+
+  const ttlIdleSteps = extractModelSteps([
+    mkUserStep('长闲置后继续', '2026-01-01T07:00:00Z', 0),
+    mkPlannerStep({
+      stepIndex: 1,
+      createdAt: '2026-01-01T07:00:00Z',
+      finishedGeneratingAt: '2026-01-01T07:00:10Z',
+      cacheReadTokens: 64000,
+      inputTokens: 1000,
+      thinkingTokens: 400,
+      responseTokens: 400,
+    }),
+    mkPlannerStep({
+      stepIndex: 2,
+      createdAt: '2026-01-01T07:05:20Z',
+      finishedGeneratingAt: '2026-01-01T07:05:30Z',
+      cacheReadTokens: 0,
+      inputTokens: 65000,
+      thinkingTokens: 400,
+      responseTokens: 400,
+    }),
+  ], []);
+
+  const ttlDiag = h.evaluateAgentInferenceHealth(ttlIdleSteps);
+  assert.equal(ttlIdleSteps[1].cacheZeroReason, 'ttl_expired');
+  assert.equal(ttlIdleSteps[1].isCacheAnomaly, false);
+  assert.equal(ttlIdleSteps[1].stepHealthLevel, 'healthy');
+  assert.equal(ttlDiag.sessionScore, 100);
+  assert.equal(ttlDiag.activeAlert, null);
+});
