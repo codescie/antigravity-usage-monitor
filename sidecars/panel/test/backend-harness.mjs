@@ -28,6 +28,7 @@ const BACKEND_MODULE_FILES = [
   '../backend/local-scanner.mjs',
   '../backend/usage-aggregator.mjs',
   '../backend/context-window-manager.mjs',
+  '../backend/inference-health.mjs',
   '../backend/telemetry-builder.mjs',
   '../backend/model-detector-core.mjs',
   '../backend/model-detector.mjs',
@@ -238,6 +239,6 @@ export function backendHarness({
       return {ok:true,json:async()=>data||{}};
     },
   };
-  vm.runInNewContext(source+'\n globalThis.api={buildTelemetryPayloadInternal,computeStepCost,resolveModelInfo,inferFamilyFromProviderOrKey,isArgonModelIdentifier,isCarbonModelIdentifier,getBaseModelLabel,formatUpstreamModelId,PLACEHOLDER_MAP,normalizeQuotaFraction,classifyOfficialBucketWindow,classifyQuotaPoolIdentity,buildOfficialQuotaPools,resolveTimeWindow,sanitizeCatalogPayload,rebuildActiveCatalog,syncCloudCatalog,getCloudStatus,isValidSemver,compareSemver,performPluginUpdate,resolveMigratedGitRemoteUrl,loadSettings,executeSettingsAction,dispatchBridgeApiRequest,ensureDetectorEngine,resolveAntigravityDetectorCatalog,resolveProbeExecutionModel,extractTieredModelBase,resolveAgentApiBinary,getModelDetectorStatus,startAntigravityModelDetection,cancelAntigravityModelDetection,syncDetectorBank,suggestAntigravityReference,CONTEXT_WINDOW_MODES,AGY_CLAMP_X64_UNPATCHED_HEX,normalizeContextWindowMode,decodeArm64ClampAt,decodeX64ClampAt,buildPatchedClampBuffer,inspectAntigravityContextBinary,resolveAntigravityDesktopAppPath,getContextWindowControlSnapshot,switchContextWindowMode,ensureContextWindowAlignedOnBoot,clearContextWindowCachesForTests};',ctx);
+  vm.runInNewContext(source+'\n globalThis.api={buildTelemetryPayloadInternal,computeStepCost,resolveModelInfo,inferFamilyFromProviderOrKey,isArgonModelIdentifier,isCarbonModelIdentifier,getBaseModelLabel,formatUpstreamModelId,PLACEHOLDER_MAP,normalizeQuotaFraction,classifyOfficialBucketWindow,classifyQuotaPoolIdentity,buildOfficialQuotaPools,resolveTimeWindow,sanitizeCatalogPayload,rebuildActiveCatalog,syncCloudCatalog,getCloudStatus,isValidSemver,compareSemver,performPluginUpdate,resolveMigratedGitRemoteUrl,loadSettings,executeSettingsAction,dispatchBridgeApiRequest,ensureDetectorEngine,resolveAntigravityDetectorCatalog,resolveProbeExecutionModel,extractTieredModelBase,resolveAgentApiBinary,getModelDetectorStatus,startAntigravityModelDetection,cancelAntigravityModelDetection,syncDetectorBank,suggestAntigravityReference,CONTEXT_WINDOW_MODES,AGY_CLAMP_X64_UNPATCHED_HEX,normalizeContextWindowMode,decodeArm64ClampAt,decodeX64ClampAt,buildPatchedClampBuffer,inspectAntigravityContextBinary,resolveAntigravityDesktopAppPath,getContextWindowControlSnapshot,switchContextWindowMode,ensureContextWindowAlignedOnBoot,clearContextWindowCachesForTests,evaluateAgentInferenceHealth,mergeAggregatedInferenceHealth};',ctx);
   return {...ctx.api,state};
 }

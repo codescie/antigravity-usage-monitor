@@ -18,6 +18,7 @@ import {
   patchText,
 } from '../core/domPatch.js';
 import {
+  copyWithTimedFeedback,
   formatCountdown,
   formatElapsedSec,
   formatMetric,
@@ -27,7 +28,7 @@ import {
   sampleSummary,
   speedReasonText,
 } from '../core/formatters.js';
-import { createSvgIcon } from '../icons/SvgIcon.js';
+import { createSvgIcon, patchSvgIcon } from '../icons/SvgIcon.js';
 import {
   fetchTelemetry,
   formatAgentLabel,
@@ -512,6 +513,148 @@ export const LiveOverviewView = defineComponent({
       ]),
     ]);
 
+    // --- 1b. 推理健康度归因与可操作自救预警卡 (Inference Health Alert Panel) ---
+    const primaryCopyTimer = { id: null };
+    const secondaryCopyTimer = { id: null };
+    let activeRenderedAlert = null;
+    const boundActionMap = new Map();
+
+    const healthBadgeEl = h('span', { className: 'health-cat-badge', text: '异常预警' });
+    const healthTitleEl = h('strong', { className: 'health-alert-title', text: '' });
+    const healthScoreEl = h('span', { className: 'health-score-pill text-mono', text: '' });
+    const healthDismissBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'icon-btn health-dismiss-btn',
+        'aria-label': '忽略本轮提示',
+        title: '忽略本轮异常提示',
+        onClick: () => {
+          if (activeRenderedAlert?.alertKey) {
+            uiStore.setState({ dismissedHealthAlertKey: activeRenderedAlert.alertKey });
+          }
+        },
+      },
+      [createSvgIcon('close', { size: 11 })]
+    );
+    const healthSummaryEl = h('div', { className: 'health-alert-summary', text: '' });
+    const healthReasonSlots = [0, 1, 2].map(() =>
+      h('div', { className: 'health-reason-item text-mono', hidden: true, text: '' })
+    );
+    const healthReasonsEl = h('div', { className: 'health-reasons-list' }, healthReasonSlots);
+
+    async function invokeBoundHealthAction(btnEl) {
+      const spec = boundActionMap.get(btnEl);
+      if (!spec?.action) return;
+      const { action, iconEl, labelEl, timerSlot } = spec;
+      if (action.kind === 'copy') {
+        await copyWithTimedFeedback(action.copyText, timerSlot, (copied) => {
+          patchSvgIcon(iconEl, copied ? 'check' : 'copy');
+          patchText(labelEl, copied ? action.toast || '已复制，可粘贴发送' : action.label || '');
+          patchClasses(btnEl, { 'is-copied': copied });
+        });
+      } else if (action.kind === 'jump_step') {
+        jumpToHealthStep(action.stepIndex, action.agentId);
+      }
+    }
+
+    const primaryBtnIcon = createSvgIcon('copy', { size: 11 });
+    const primaryBtnLabel = h('span', { text: '' });
+    const healthPrimaryBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-health-action is-primary',
+        hidden: true,
+        onClick: () => void invokeBoundHealthAction(healthPrimaryBtn),
+      },
+      [primaryBtnIcon, primaryBtnLabel]
+    );
+
+    const secondaryBtnIcon = createSvgIcon('copy', { size: 11 });
+    const secondaryBtnLabel = h('span', { text: '' });
+    const healthSecondaryBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-health-action',
+        hidden: true,
+        onClick: () => void invokeBoundHealthAction(healthSecondaryBtn),
+      },
+      [secondaryBtnIcon, secondaryBtnLabel]
+    );
+
+    const jumpBtnIcon = createSvgIcon('table', { size: 11 });
+    const jumpBtnLabel = h('span', { text: '' });
+    const healthJumpBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'btn-health-action is-ghost',
+        hidden: true,
+        onClick: () => void invokeBoundHealthAction(healthJumpBtn),
+      },
+      [jumpBtnIcon, jumpBtnLabel]
+    );
+
+    const healthAlertPanel = h(
+      'section',
+      { className: 'panel health-alert-panel', hidden: true },
+      [
+        h('div', { className: 'health-alert-head' }, [
+          h('div', { className: 'health-alert-title-wrap' }, [
+            createSvgIcon('warning', { size: 13, className: 'health-alert-icon' }),
+            healthBadgeEl,
+            healthTitleEl,
+          ]),
+          h('div', { className: 'health-alert-head-right' }, [
+            healthScoreEl,
+            healthDismissBtn,
+          ]),
+        ]),
+        healthSummaryEl,
+        healthReasonsEl,
+        h('div', { className: 'health-alert-actions' }, [
+          healthPrimaryBtn,
+          healthSecondaryBtn,
+          healthJumpBtn,
+        ]),
+      ]
+    );
+
+    function jumpToHealthStep(stepIndex, agentId) {
+      if (stepIndex == null || !Number.isFinite(Number(stepIndex))) return;
+      uiStore.setState({
+        activeView: 'steps',
+        stepsSubTab: 'steps',
+        stepsOnlyAnomalies: false,
+        ...(agentId && agentId !== 'main' && agentId !== 'all'
+          ? { selectedAgentScope: agentId }
+          : {}),
+        highlightedStepTarget: {
+          cascadeId: latestData?.activeConversation?.cascadeId || '',
+          agentId: agentId || '',
+          stepIndex: Number(stepIndex),
+          seq: Date.now(),
+        },
+      });
+    }
+
+    function bindHealthActionButton(btnEl, iconEl, labelEl, action, timerSlot, defaultClass) {
+      if (!action) {
+        patchAttr(btnEl, 'hidden', true);
+        boundActionMap.delete(btnEl);
+        return;
+      }
+      patchAttr(btnEl, 'hidden', false);
+      const isCopy = action.kind === 'copy';
+      const baseIcon = isCopy ? 'copy' : 'table';
+      patchSvgIcon(iconEl, baseIcon);
+      patchText(labelEl, action.label || '');
+      patchAttr(btnEl, 'class', defaultClass);
+      boundActionMap.set(btnEl, { action, iconEl, labelEl, timerSlot });
+    }
+
     // --- 2. 6 段上下文窗口构成面板（自动锚定模型上下文压缩基线 + 方案 B 内嵌独立 256k 窗口检视条） ---
     const ctxAgentBadge = h('span', {
       className: 'agent-badge badge-main',
@@ -675,7 +818,7 @@ export const LiveOverviewView = defineComponent({
       {
         style: 'display: flex; flex-direction: column; gap: var(--space-3); padding-bottom: 2px;',
       },
-      [matrixEl, ctxPanel, quotaPanel, liveActivityBar]
+      [matrixEl, healthAlertPanel, ctxPanel, quotaPanel, liveActivityBar]
     );
     const viewScrollbar = CustomScrollbar({
       contentEl: overviewInner,
@@ -981,6 +1124,68 @@ export const LiveOverviewView = defineComponent({
         `缓存 ${active.latestCacheHitPct ?? 0}% · 累计 ${formatUsd(active.sessionCostUsd || 0)}`
       );
 
+      // 1b. 更新推理健康度归因与自救预警卡
+      const healthInfo = active.inferenceHealth || data.activeConversation?.inferenceHealth || null;
+      const rawAlert = healthInfo?.activeAlert || null;
+      const showAlert = Boolean(
+        rawAlert && rawAlert.alertKey && rawAlert.alertKey !== uiSt.dismissedHealthAlertKey
+      );
+      patchAttr(healthAlertPanel, 'hidden', !showAlert);
+      if (showAlert) {
+        activeRenderedAlert = rawAlert;
+        patchClasses(healthAlertPanel, { 'is-critical': rawAlert.level === 'critical' });
+        patchText(healthBadgeEl, rawAlert.badge || '异常预警');
+        patchText(healthTitleEl, rawAlert.title || '推理异常预警');
+        patchText(healthScoreEl, `健康 ${rawAlert.score ?? '--'}`);
+        patchText(healthSummaryEl, rawAlert.summary || '');
+        const reasons = Array.isArray(rawAlert.reasons) ? rawAlert.reasons : [];
+        patchAttr(healthReasonsEl, 'hidden', reasons.length === 0);
+        for (let rIdx = 0; rIdx < healthReasonSlots.length; rIdx++) {
+          const rText = reasons[rIdx] || '';
+          patchAttr(healthReasonSlots[rIdx], 'hidden', !rText);
+          patchText(healthReasonSlots[rIdx], rText);
+        }
+        bindHealthActionButton(
+          healthPrimaryBtn,
+          primaryBtnIcon,
+          primaryBtnLabel,
+          rawAlert.primaryAction,
+          primaryCopyTimer,
+          'btn-health-action is-primary'
+        );
+        bindHealthActionButton(
+          healthSecondaryBtn,
+          secondaryBtnIcon,
+          secondaryBtnLabel,
+          rawAlert.secondaryAction,
+          secondaryCopyTimer,
+          'btn-health-action'
+        );
+        const bothCopy =
+          rawAlert.primaryAction?.kind === 'copy' && rawAlert.secondaryAction?.kind === 'copy';
+        const showExtraJump = bothCopy && rawAlert.anchorStepIndex != null;
+        if (showExtraJump) {
+          bindHealthActionButton(
+            healthJumpBtn,
+            jumpBtnIcon,
+            jumpBtnLabel,
+            {
+              kind: 'jump_step',
+              label: `定位 #${rawAlert.anchorStepIndex}`,
+              stepIndex: rawAlert.anchorStepIndex,
+              agentId: rawAlert.agentId,
+            },
+            primaryCopyTimer,
+            'btn-health-action is-ghost'
+          );
+        } else {
+          patchAttr(healthJumpBtn, 'hidden', true);
+          boundActionMap.delete(healthJumpBtn);
+        }
+      } else {
+        activeRenderedAlert = null;
+      }
+
       // 2. 更新 10 段上下文窗口构成与内嵌上下文窗口检视胶囊条
       patchAttr(ctxAgentBadge, 'hidden', !hasSubagents);
       patchAttr(ctxInspectorBar, 'hidden', !hasSubagents);
@@ -1233,24 +1438,28 @@ export const LiveOverviewView = defineComponent({
     );
 
     let prevCtxTarget = uiStore.getState().ctxInspectorAgentId;
+    let prevDismissedAlertKey = uiStore.getState().dismissedHealthAlertKey;
 
     const unsubView = uiStore.subscribe(
       (st) => ({
         activeView: st.activeView,
         ctxInspectorAgentId: st.ctxInspectorAgentId,
+        dismissedHealthAlertKey: st.dismissedHealthAlertKey,
       }),
       (slice) => {
         const scopeChanged = slice.ctxInspectorAgentId !== prevCtxTarget;
+        const dismissChanged = slice.dismissedHealthAlertKey !== prevDismissedAlertKey;
         prevCtxTarget = slice.ctxInspectorAgentId;
+        prevDismissedAlertKey = slice.dismissedHealthAlertKey;
 
         if (slice.activeView !== 'overview') {
           pauseLiveTicker();
           stopCountdownTicker();
-          if (scopeChanged) isDirty = true;
+          if (scopeChanged || dismissChanged) isDirty = true;
           return;
         }
         ensureCountdownTicker();
-        if ((isDirty || scopeChanged) && latestData) {
+        if ((isDirty || scopeChanged || dismissChanged) && latestData) {
           isDirty = false;
           renderData(latestData);
         } else if (activityTimersMap.size > 0) {
@@ -1279,6 +1488,8 @@ export const LiveOverviewView = defineComponent({
     onCleanup(() => {
       stopLiveTicker();
       stopCountdownTicker();
+      if (primaryCopyTimer.id) clearTimeout(primaryCopyTimer.id);
+      if (secondaryCopyTimer.id) clearTimeout(secondaryCopyTimer.id);
       unsub();
       unsubView();
       if (ro) ro.disconnect();

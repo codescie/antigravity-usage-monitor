@@ -727,6 +727,9 @@ export async function enumerateAndSyncConversations({
     if (!Object.prototype.hasOwnProperty.call(lastCachedStep, 'turnIndex')) {
       return true;
     }
+    if (!Object.prototype.hasOwnProperty.call(lastCachedStep, 'healthSignals')) {
+      return true;
+    }
     if (steps.some((s) => !Object.prototype.hasOwnProperty.call(s, 'responseModel'))) {
       return true;
     }

@@ -96,4 +96,13 @@ export const SVG_ICON_DEFS = Object.freeze({
     { tag: 'path', attrs: { d: 'M8 8.2c0 1.9-.6 3.7-1.7 5.1' } },
     { tag: 'path', attrs: { d: 'M3.6 10.8c-.3.8-.6 1.5-1 2.2' } },
   ],
+  copy: [
+    { tag: 'rect', attrs: { x: '5.2', y: '5.2', width: '8.3', height: '8.3', rx: '1.3' } },
+    {
+      tag: 'path',
+      attrs: {
+        d: 'M10.5 5.2V3.6c0-.7-.6-1.3-1.3-1.3H3.6c-.7 0-1.3.6-1.3 1.3v5.6c0 .7.6 1.3 1.3 1.3h1.6',
+      },
+    },
+  ],
 });

@@ -625,6 +625,7 @@ export function mountWindowOverlay() {
   let isTopbarUpdating = false;
 
   const updateDot = h('span', { className: 'wm-update-dot', hidden: true });
+  const healthDot = h('span', { className: 'wm-health-dot', hidden: true });
   const topbarUpdateIcon = createSvgIcon('arrow-down', { size: 10 });
   const topbarUpdateLabel = h('span', { className: 'wm-update-label', text: '新版本' });
   const topbarUpdateBtn = h(
@@ -755,7 +756,7 @@ export function mountWindowOverlay() {
         }, 40);
       },
     },
-    [capsuleSlots[0].el, sep0, capsuleSlots[1].el, sep1, capsuleSlots[2].el, updateDot]
+    [capsuleSlots[0].el, sep0, capsuleSlots[1].el, sep1, capsuleSlots[2].el, updateDot, healthDot]
   );
   capsuleShadow.appendChild(multiBtn);
   capsuleShadow.appendChild(capsuleBtn);
@@ -912,13 +913,34 @@ export function mountWindowOverlay() {
     ]
   );
 
+  const hoverHealthBadgeEl = h('span', { className: 'wm-hover-health-badge', text: '异常预警' });
+  const hoverHealthReasonEl = h('span', { className: 'wm-hover-health-text', text: '' });
+  const hoverHealthRightEl = h('span', { className: 'wm-hover-health-right text-mono', text: '' });
+  const hoverHealthBar = h(
+    'div',
+    { className: 'wm-hover-health-bar', hidden: true },
+    [
+      h('span', { className: 'wm-hover-health-left' }, [
+        createSvgIcon('warning', { size: 11 }),
+        hoverHealthBadgeEl,
+        hoverHealthReasonEl,
+      ]),
+      hoverHealthRightEl,
+    ]
+  );
+
+  const hoverBannersWrap = h('div', { className: 'wm-hover-banners' }, [
+    hoverUpdateBar,
+    hoverHealthBar,
+  ]);
+
   const hoverTipEl = h(
     'div',
     {
       className: 'wm-hover-tip',
       hidden: true,
     },
-    [hoverUpdateBar, hoverMatrixEl, hoverCtxPanel, hoverQuotaPanel]
+    [hoverBannersWrap, hoverMatrixEl, hoverCtxPanel, hoverQuotaPanel]
   );
 
   // 左侧多会话实时看板浮层（活跃运行会话卡片 + 近期多窗口会话速览，全槽位预占、就地补丁更新）
@@ -1647,6 +1669,9 @@ export function mountWindowOverlay() {
       patchText(multiLabel, '0 运行中');
       patchText(multiRunningMetaEl, '读取中...');
       stopMultiLiveTicker();
+      patchAttr(healthDot, 'hidden', true);
+      patchClasses(capsuleBtn, { 'has-health-warn': false, 'has-health-critical': false });
+      patchAttr(hoverHealthBar, 'hidden', true);
 
       applyCapsuleSlots(slotKeys, { hasTelemetry: false });
       return;
@@ -2011,6 +2036,39 @@ export function mountWindowOverlay() {
       updateResponsiveLayout();
     }
 
+    const activeHealthObj =
+      (hasSubagents && aggregated?.inferenceHealth) ||
+      overviewActive?.inferenceHealth ||
+      activeConv?.inferenceHealth ||
+      null;
+    const rawHealthAlert = activeHealthObj?.activeAlert || null;
+    const showHealthSignal = Boolean(
+      rawHealthAlert &&
+        rawHealthAlert.alertKey &&
+        rawHealthAlert.alertKey !== uiSt.dismissedHealthAlertKey
+    );
+    const isHealthCritical = showHealthSignal && rawHealthAlert.level === 'critical';
+    const isHealthWarn = showHealthSignal && !isHealthCritical;
+    patchAttr(healthDot, 'hidden', !showHealthSignal);
+    patchClasses(healthDot, { 'is-warn': isHealthWarn, 'is-critical': isHealthCritical });
+    patchClasses(capsuleBtn, {
+      'has-health-warn': isHealthWarn,
+      'has-health-critical': isHealthCritical,
+    });
+    patchAttr(hoverHealthBar, 'hidden', !showHealthSignal);
+    if (showHealthSignal) {
+      patchClasses(hoverHealthBar, { 'is-critical': isHealthCritical });
+      patchText(hoverHealthBadgeEl, rawHealthAlert.badge || '异常预警');
+      patchText(
+        hoverHealthReasonEl,
+        rawHealthAlert.reasons?.[0] || rawHealthAlert.title || '检测到推理波动'
+      );
+      patchText(
+        hoverHealthRightEl,
+        `健康 ${rawHealthAlert.score ?? '--'} · 点击处理`
+      );
+    }
+
     // --- 同步悬停三卡片全景概览（与 LiveOverviewView 保持完全一致的数据口径与视觉呈现） ---
     const activeModelDisplay = resolveModelDisplayInfo(overviewActive, telemetry.settings, {
       fallback: '模型未知',
@@ -2132,6 +2190,7 @@ export function mountWindowOverlay() {
     (st) => ({
       selectedAgentScope: st.selectedAgentScope,
       ctxInspectorAgentId: st.ctxInspectorAgentId,
+      dismissedHealthAlertKey: st.dismissedHealthAlertKey,
     }),
     () => renderCapsuleTelemetry()
   );

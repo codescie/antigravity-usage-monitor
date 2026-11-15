@@ -220,7 +220,14 @@ function isEquivalentTelemetry(prev, next) {
   if (
     pAct?.latestStepCostUsd !== nAct?.latestStepCostUsd ||
     pAct?.sessionCostUsd !== nAct?.sessionCostUsd ||
-    pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls
+    pAct?.sessionUnpricedCalls !== nAct?.sessionUnpricedCalls ||
+    pAct?.inferenceHealth?.activeAlert?.alertKey !== nAct?.inferenceHealth?.activeAlert?.alertKey ||
+    pAct?.inferenceHealth?.anomalyStepCount !== nAct?.inferenceHealth?.anomalyStepCount ||
+    pAct?.inferenceHealth?.sessionScore !== nAct?.inferenceHealth?.sessionScore ||
+    pAct?.aggregated?.inferenceHealth?.activeAlert?.alertKey !==
+      nAct?.aggregated?.inferenceHealth?.activeAlert?.alertKey ||
+    pAct?.aggregated?.inferenceHealth?.anomalyStepCount !==
+      nAct?.aggregated?.inferenceHealth?.anomalyStepCount
   ) {
     return false;
   }
@@ -248,6 +255,8 @@ function isEquivalentTelemetry(prev, next) {
       pa?.sessionUnpricedCalls !== na?.sessionUnpricedCalls ||
       pa?.activeModelShort !== na?.activeModelShort ||
       pa?.activeModelUpstream !== na?.activeModelUpstream ||
+      pa?.inferenceHealth?.activeAlert?.alertKey !== na?.inferenceHealth?.activeAlert?.alertKey ||
+      pa?.inferenceHealth?.anomalyStepCount !== na?.inferenceHealth?.anomalyStepCount ||
       pa?.context?.totalTokens !== na?.context?.totalTokens ||
       pa?.context?.compactionLimitTokens !== na?.context?.compactionLimitTokens ||
       pa?.context?.limitTokens !== na?.context?.limitTokens ||
@@ -285,6 +294,10 @@ function isEquivalentTelemetry(prev, next) {
         bs?.totalDurationSec !== as?.totalDurationSec ||
         bs?.turnIndex !== as?.turnIndex ||
         bs?.rootTurnIndex !== as?.rootTurnIndex ||
+        bs?.stepHealthLevel !== as?.stepHealthLevel ||
+        bs?.stepHealthBadge !== as?.stepHealthBadge ||
+        bs?.turnHealthScore !== as?.turnHealthScore ||
+        bs?.rootTurnHealthScore !== as?.rootTurnHealthScore ||
         bs?.outputTokens !== as?.outputTokens ||
         bs?.inputTokens !== as?.inputTokens ||
         bs?.cacheReadTokens !== as?.cacheReadTokens ||
@@ -328,6 +341,10 @@ function isEquivalentTelemetry(prev, next) {
       before.totalDurationSec !== after.totalDurationSec ||
       before.turnIndex !== after.turnIndex ||
       before.rootTurnIndex !== after.rootTurnIndex ||
+      before.stepHealthLevel !== after.stepHealthLevel ||
+      before.stepHealthBadge !== after.stepHealthBadge ||
+      before.turnHealthScore !== after.turnHealthScore ||
+      before.rootTurnHealthScore !== after.rootTurnHealthScore ||
       before.outputTokens !== after.outputTokens ||
       before.inputTokens !== after.inputTokens ||
       before.cacheReadTokens !== after.cacheReadTokens ||

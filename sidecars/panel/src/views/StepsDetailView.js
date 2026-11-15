@@ -15,6 +15,7 @@ import {
   patchText,
 } from '../core/domPatch.js';
 import {
+  copyWithTimedFeedback,
   formatMetric,
   formatStepDuration,
   formatStepDurationDetail,
@@ -25,7 +26,7 @@ import {
   sampleSummary,
   speedReasonText,
 } from '../core/formatters.js';
-import { createSvgIcon } from '../icons/SvgIcon.js';
+import { createSvgIcon, patchSvgIcon } from '../icons/SvgIcon.js';
 import {
   formatAgentLabel,
   getAgentBadgeClass,
@@ -94,20 +95,129 @@ export const StepsDetailView = defineComponent({
       className: 'table-scroll-host',
     });
 
-    const turnTipEl = h('div', {
-      className: 'turn-prompt-tip',
-      role: 'tooltip',
-      hidden: true,
-    });
-    const hideTurnTip = () => patchAttr(turnTipEl, 'hidden', true);
+    const tipBadgeEl = h('span', { className: 'turn-tip-badge', text: '' });
+    const tipScoreEl = h('span', { className: 'turn-tip-score text-mono', text: '' });
+    const tipHeadEl = h('div', { className: 'turn-tip-head', hidden: true }, [
+      tipBadgeEl,
+      tipScoreEl,
+    ]);
+    const tipPromptEl = h('div', { className: 'turn-tip-prompt', text: '' });
+    const tipReasonEl = h('div', { className: 'turn-tip-reason text-mono', hidden: true, text: '' });
+    const tipCopyIcon = createSvgIcon('copy', { size: 11 });
+    const tipCopyLabel = h('span', { text: '' });
+    let activeTipCopyAction = null;
+    const tipCopyBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'turn-tip-copy-btn',
+        onClick: async (e) => {
+          e?.stopPropagation?.();
+          if (!activeTipCopyAction) return;
+          const act = activeTipCopyAction;
+          await copyWithTimedFeedback(act.copyText, tipCopyTimer, (copied) => {
+            patchSvgIcon(tipCopyIcon, copied ? 'check' : 'copy');
+            patchText(tipCopyLabel, copied ? act.toast || '已复制' : act.label);
+            patchClasses(tipCopyBtn, { 'is-copied': copied });
+          });
+        },
+      },
+      [tipCopyIcon, tipCopyLabel]
+    );
+    const tipActionRowEl = h('div', { className: 'turn-tip-actions', hidden: true }, [tipCopyBtn]);
 
-    function showTurnTip(anchorCell, promptText) {
-      const text = String(promptText || '').trim();
-      if (!anchorCell || !text) {
+    const turnTipEl = h(
+      'div',
+      {
+        className: 'turn-prompt-tip',
+        role: 'tooltip',
+        hidden: true,
+      },
+      [tipHeadEl, tipPromptEl, tipReasonEl, tipActionRowEl]
+    );
+
+    let tipHideTimer = null;
+    const tipCopyTimer = { id: null };
+    let flashRowTimer = null;
+    let lastHandledTargetSeq = 0;
+    let lastObservedCascadeId = '';
+
+    const cancelHideTurnTip = () => {
+      if (tipHideTimer) {
+        clearTimeout(tipHideTimer);
+        tipHideTimer = null;
+      }
+    };
+    const hideTurnTip = () => {
+      cancelHideTurnTip();
+      patchAttr(turnTipEl, 'hidden', true);
+    };
+    const scheduleHideTurnTip = () => {
+      cancelHideTurnTip();
+      tipHideTimer = setTimeout(() => {
+        tipHideTimer = null;
+        patchAttr(turnTipEl, 'hidden', true);
+      }, 110);
+    };
+
+    turnTipEl.onmouseenter = cancelHideTurnTip;
+    turnTipEl.onmouseleave = scheduleHideTurnTip;
+
+    function showTurnTip(anchorCell, item) {
+      cancelHideTurnTip();
+      const promptText = String(item?.prompt || '').trim();
+      const st = item?.st || {};
+      const diag = item?.turnDiag || null;
+      const isAnomalousStep =
+        st.stepHealthLevel === 'warn' || st.stepHealthLevel === 'critical';
+      const isAnomalousTurn =
+        diag && (diag.level === 'warn' || diag.level === 'critical');
+      const reasonText =
+        st.stepHealthDetail || (isAnomalousTurn && diag.reasons?.join(' · ')) || '';
+
+      if (!anchorCell || (!promptText && !isAnomalousStep && !isAnomalousTurn && !reasonText)) {
         hideTurnTip();
         return;
       }
-      patchText(turnTipEl, text);
+
+      const showHead = Boolean(isAnomalousStep || isAnomalousTurn);
+      patchAttr(tipHeadEl, 'hidden', !showHead);
+      if (showHead) {
+        const badgeTxt =
+          st.stepHealthBadge || diag?.badge || (isAnomalousTurn ? '异常轮次' : '异常步骤');
+        const scoreVal = item?.turnScore ?? diag?.score;
+        const isCritical = st.stepHealthLevel === 'critical' || diag?.level === 'critical';
+        patchClasses(tipHeadEl, { 'is-critical': isCritical });
+        patchText(tipBadgeEl, badgeTxt);
+        patchText(tipScoreEl, scoreVal != null ? `健康 ${scoreVal}` : '');
+      }
+
+      patchAttr(tipPromptEl, 'hidden', !promptText);
+      patchText(tipPromptEl, promptText);
+
+      patchAttr(tipReasonEl, 'hidden', !reasonText);
+      patchText(tipReasonEl, reasonText);
+
+      const copyAction =
+        isAnomalousTurn && diag?.primaryAction?.kind === 'copy'
+          ? diag.primaryAction
+          : isAnomalousStep
+            ? {
+                kind: 'copy',
+                label: `复制 #${st.stepIndex} 回退指令`,
+                copyText: `我需要打断当前做法：从 #${st.stepIndex} 步开始出现异常（${reasonText || st.stepHealthBadge}），请先回退或核对 #${st.stepIndex} 之前的正确状态，再按原目标重新执行。`,
+                toast: '已复制回退指令',
+              }
+            : null;
+
+      patchAttr(tipActionRowEl, 'hidden', !copyAction);
+      activeTipCopyAction = copyAction || null;
+      if (copyAction) {
+        patchSvgIcon(tipCopyIcon, 'copy');
+        patchText(tipCopyLabel, copyAction.label);
+        patchClasses(tipCopyBtn, { 'is-copied': false });
+      }
+
       patchAttr(turnTipEl, 'hidden', false);
       if (
         typeof panelEl.getBoundingClientRect === 'function' &&
@@ -116,9 +226,9 @@ export const StepsDetailView = defineComponent({
         const panelRect = panelEl.getBoundingClientRect();
         const cellRect = anchorCell.getBoundingClientRect();
         if (panelRect.width > 0 && panelRect.height > 0) {
-          const tipH = turnTipEl.offsetHeight || 36;
+          const tipH = turnTipEl.offsetHeight || 56;
           const placeAbove =
-            panelRect.bottom - cellRect.bottom < tipH + 10 &&
+            panelRect.bottom - cellRect.bottom < tipH + 12 &&
             cellRect.top - panelRect.top > tipH + 6;
           const topPx = placeAbove
             ? Math.max(4, Math.round(cellRect.top - panelRect.top - tipH - 4))
@@ -129,6 +239,21 @@ export const StepsDetailView = defineComponent({
         }
       }
     }
+
+    const anomalyFilterLabel = h('span', { text: '异常 (0)' });
+    const anomalyFilterBtn = h(
+      'button',
+      {
+        type: 'button',
+        className: 'steps-anomaly-filter-btn',
+        hidden: true,
+        title: '只看存在推理或执行异常的步骤',
+        onClick: () => {
+          uiStore.setState({ stepsOnlyAnomalies: !uiStore.getState().stepsOnlyAnomalies });
+        },
+      },
+      [createSvgIcon('warning', { size: 11 }), anomalyFilterLabel]
+    );
 
     // --- 子表 2：按模型汇总表（列定义：模型名称、调用次数、有效均速、总 Token、费用） ---
     const modelsTbody = h('tbody');
@@ -163,6 +288,7 @@ export const StepsDetailView = defineComponent({
           h('span', { className: 'panel-title steps-panel-title' }, [
             createSvgIcon('table', { size: 13 }),
             h('span', { text: '调用记录' }),
+            anomalyFilterBtn,
           ]),
           h('div', { className: 'steps-header-controls' }, [
             inlineScopeSelect.el,
@@ -240,10 +366,44 @@ export const StepsDetailView = defineComponent({
         inlineScopeSelect.close();
       }
 
-      const steps =
+      const rawSteps =
         (hasSubagents ? scopedConv?.recentSteps : slice.recentSteps) ||
         slice.recentSteps ||
         [];
+      const curCid = slice.cascadeId || '';
+      if (curCid && curCid !== lastObservedCascadeId) {
+        if (lastObservedCascadeId && uiSt.stepsOnlyAnomalies) {
+          uiStore.setState({ stepsOnlyAnomalies: false });
+        }
+        lastObservedCascadeId = curCid;
+      }
+
+      const healthDiagList =
+        (hasSubagents && effectiveScope === 'all'
+          ? aggregated?.inferenceHealth?.turnDiagnoses
+          : scopedConv?.inferenceHealth?.turnDiagnoses) ||
+        slice.activeConversation?.inferenceHealth?.turnDiagnoses ||
+        [];
+      const diagByTurnMap = new Map(healthDiagList.map((d) => [d.turnIndex, d]));
+
+      const isStepAnomalous = (st) =>
+        Boolean(
+          st?.stepHealthLevel === 'warn' ||
+            st?.stepHealthLevel === 'critical' ||
+            st?.isCacheAnomaly
+        );
+      const anomalyCount = rawSteps.filter(isStepAnomalous).length;
+      const onlyAnomalies = Boolean(uiStore.getState().stepsOnlyAnomalies);
+      if (anomalyCount === 0 && onlyAnomalies) {
+        uiStore.setState({ stepsOnlyAnomalies: false });
+      }
+      const effectiveOnlyAnomalies = Boolean(uiStore.getState().stepsOnlyAnomalies && anomalyCount > 0);
+      patchAttr(anomalyFilterBtn, 'hidden', anomalyCount === 0 && !effectiveOnlyAnomalies);
+      patchClasses(anomalyFilterBtn, { 'is-active': effectiveOnlyAnomalies });
+      patchText(anomalyFilterLabel, `异常 (${anomalyCount})`);
+
+      const steps = effectiveOnlyAnomalies ? rawSteps.filter(isStepAnomalous) : rawSteps;
+
       const models =
         (Array.isArray(scopedConv?.modelBreakdown) && scopedConv.modelBreakdown.length > 0
           ? scopedConv.modelBreakdown
@@ -260,7 +420,12 @@ export const StepsDetailView = defineComponent({
 
       subTabSwitch.setProps({
         options: [
-          { value: 'steps', label: `按步查看 (${steps.length})` },
+          {
+            value: 'steps',
+            label: effectiveOnlyAnomalies
+              ? `异常步骤 (${steps.length}/${rawSteps.length})`
+              : `按步查看 (${rawSteps.length})`,
+          },
           { value: 'models', label: `按模型汇总 (${modelsTabBadge})` },
         ],
       });
@@ -281,10 +446,18 @@ export const StepsDetailView = defineComponent({
       };
       const decoratedSteps = steps.map((st, idx) => {
         const tKey = turnKeyOf(st);
+        const tIdx = getStepTurnIdx(st);
         const hasUp = Boolean(tKey && idx > 0 && turnKeyOf(steps[idx - 1]) === tKey);
         const hasDown = Boolean(
           tKey && idx + 1 < steps.length && turnKeyOf(steps[idx + 1]) === tKey
         );
+        const turnDiag = Number.isInteger(tIdx) && tIdx > 0 ? diagByTurnMap.get(tIdx) || null : null;
+        const turnLevel = useRootTurn
+          ? st?.rootTurnHealthLevel || turnDiag?.level || st?.turnHealthLevel || 'healthy'
+          : st?.turnHealthLevel || turnDiag?.level || 'healthy';
+        const turnScore = useRootTurn
+          ? st?.rootTurnHealthScore ?? turnDiag?.score ?? st?.turnHealthScore ?? null
+          : st?.turnHealthScore ?? turnDiag?.score ?? null;
         return {
           st,
           rowKey: `${st.agentCascadeId || slice.cascadeId || 'conv'}-${st.stepIndex}`,
@@ -294,6 +467,9 @@ export const StepsDetailView = defineComponent({
           isStart: getStepIsStart(st),
           isLatest: getStepIsLatest(st),
           prompt: getStepPrompt(st),
+          turnDiag,
+          turnLevel,
+          turnScore,
         };
       });
 
@@ -305,7 +481,7 @@ export const StepsDetailView = defineComponent({
         sigFn: (item) => {
           const { st } = item;
           const disp = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
-          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.totalDurationSec}:${st.thinkingDurationSec}:${st.nativeStreamSec}:${st.isComplete}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}:${item.hasTurn}:${item.hasUp}:${item.hasDown}:${item.isStart}:${item.isLatest}:${item.prompt}`;
+          return `${hasSubagents}:${effectiveScope}:${st.agentId || 'main'}:${st.stepIndex}:${disp.text}:${disp.title}:${st.tokPerSec}:${st.ttftSec}:${st.totalDurationSec}:${st.thinkingDurationSec}:${st.nativeStreamSec}:${st.isComplete}:${st.contextTokens}:${st.outputTokens}:${st.cacheHitPct}:${st.costUsd}:${st.selectedSpeedReason}:${st.stepHealthLevel || ''}:${st.stepHealthBadge || ''}:${st.isCacheAnomaly ? 1 : 0}:${item.turnLevel}:${item.turnScore ?? ''}:${item.hasTurn}:${item.hasUp}:${item.hasDown}:${item.isStart}:${item.isLatest}:${item.prompt}`;
         },
         createRow: () => {
           const railLineEl = h('span', { className: 'turn-rail-line', hidden: true });
@@ -321,10 +497,12 @@ export const StepsDetailView = defineComponent({
             style: 'margin-right: 4px;',
           });
           const stepNumText = h('span');
+          const stepHealthTagEl = h('span', { className: 'step-health-tag', hidden: true });
           const tdStep = h('td', { className: 'step-cell' }, [
             railEl,
             agentBadgeEl,
             stepNumText,
+            stepHealthTagEl,
           ]);
 
           const tdModel = h('td', { className: 'col-model model-cell' });
@@ -350,12 +528,14 @@ export const StepsDetailView = defineComponent({
           return {
             el: tr,
             refs: {
+              tr,
               tdStep,
               railEl,
               railLineEl,
               railDotEl,
               agentBadgeEl,
               stepNumText,
+              stepHealthTagEl,
               tdModel,
               speedMain,
               speedReason,
@@ -370,32 +550,49 @@ export const StepsDetailView = defineComponent({
           };
         },
         updateRow: (refs, item) => {
-          const { st, hasTurn, hasUp, hasDown, isStart, isLatest, prompt } = item;
+          const { st, hasTurn, hasUp, hasDown, isStart, isLatest, prompt, turnLevel } = item;
+          patchAttr(refs.tr, 'data-step-index', String(Number(st.stepIndex)));
+          patchAttr(refs.tr, 'data-agent-id', st.agentId || 'main');
+          patchClasses(refs.tr, {
+            'is-row-warn': st.stepHealthLevel === 'warn',
+            'is-row-critical': st.stepHealthLevel === 'critical',
+          });
+
+          const stepAnomalyDot =
+            !isStart &&
+            (hasUp || !hasDown) &&
+            (st.stepHealthLevel === 'warn' || st.stepHealthLevel === 'critical');
+
           patchAttr(refs.railEl, 'hidden', !hasTurn);
           if (hasTurn) {
             patchClasses(refs.railEl, {
               'is-latest': isLatest,
               'has-up': hasUp,
               'has-down': hasDown,
+              'tone-warn': turnLevel === 'warn',
+              'tone-critical': turnLevel === 'critical',
             });
             patchAttr(refs.railLineEl, 'hidden', !hasUp && !hasDown);
             const showOrigin = isStart;
-            const showCap = !showOrigin && !hasUp && hasDown;
-            patchAttr(refs.railDotEl, 'hidden', !showOrigin && !showCap);
+            const showCap = !showOrigin && !hasUp && hasDown && !stepAnomalyDot;
+            patchAttr(refs.railDotEl, 'hidden', !showOrigin && !showCap && !stepAnomalyDot);
             patchClasses(refs.railDotEl, {
               'is-origin': showOrigin,
               'is-cap': showCap,
+              'is-anomaly-dot': stepAnomalyDot,
+              'is-warn': st.stepHealthLevel === 'warn',
+              'is-critical': st.stepHealthLevel === 'critical',
             });
           }
 
           refs.tdStep.onmouseenter = (ev) => {
-            if (ev?.target === refs.agentBadgeEl || !hasTurn || !prompt) {
+            if (ev?.target === refs.agentBadgeEl) {
               hideTurnTip();
               return;
             }
-            showTurnTip(refs.tdStep, prompt);
+            showTurnTip(refs.tdStep, item);
           };
-          refs.tdStep.onmouseleave = hideTurnTip;
+          refs.tdStep.onmouseleave = scheduleHideTurnTip;
 
           patchAttr(refs.agentBadgeEl, 'hidden', !hasSubagents);
           if (hasSubagents) {
@@ -419,6 +616,17 @@ export const StepsDetailView = defineComponent({
             };
           }
           patchText(refs.stepNumText, `#${Number(st.stepIndex)}`);
+          const showBadgeTag =
+            Boolean(st.stepHealthBadge) &&
+            (st.stepHealthLevel === 'warn' || st.stepHealthLevel === 'critical');
+          patchAttr(refs.stepHealthTagEl, 'hidden', !showBadgeTag);
+          if (showBadgeTag) {
+            patchText(refs.stepHealthTagEl, st.stepHealthBadge);
+            patchClasses(refs.stepHealthTagEl, {
+              'is-critical': st.stepHealthLevel === 'critical',
+            });
+          }
+
           const modelDisplay = resolveModelDisplayInfo(st, displaySettings, { fallback: '—' });
           patchText(refs.tdModel, modelDisplay.text);
           patchAttr(refs.tdModel, 'title', modelDisplay.title);
@@ -439,9 +647,18 @@ export const StepsDetailView = defineComponent({
           patchAttr(
             refs.tdCtx,
             'title',
-            `上下文 ${formatTokens(st.contextTokens)} · 输出 +${Number(st.outputTokens || 0)} · 缓存 ${Number(st.cacheHitPct ?? 0)}%`
+            `上下文 ${formatTokens(st.contextTokens)} · 输出 +${Number(st.outputTokens || 0)} · 缓存 ${Number(st.cacheHitPct ?? 0)}%${st.stepHealthDetail ? ` · ${st.stepHealthDetail}` : ''}`
           );
           patchText(refs.tdCache, `${Number(st.cacheHitPct ?? 0)}%`);
+          patchClasses(refs.tdCache, {
+            'accent-ok': !st.isCacheAnomaly,
+            'tone-warn': Boolean(st.isCacheAnomaly),
+          });
+          if (st.isCacheAnomaly && st.stepHealthDetail) {
+            patchAttr(refs.tdCache, 'title', st.stepHealthDetail);
+          } else {
+            patchAttr(refs.tdCache, 'title', false);
+          }
 
           const costVal = st.costUsd;
           patchText(refs.tdCost, formatUsd(costVal, { precise: true }));
@@ -514,28 +731,70 @@ export const StepsDetailView = defineComponent({
       }
     );
 
+    function focusTargetStepIfRequested(target) {
+      if (!target || !target.seq || target.seq === lastHandledTargetSeq) return;
+      lastHandledTargetSeq = target.seq;
+      const rows = Array.from(stepsTbody.children || []);
+      for (const r of rows) {
+        patchClasses(r, { 'is-step-flash': false });
+      }
+      const match = rows.find(
+        (r) =>
+          Number(r.getAttribute?.('data-step-index')) === Number(target.stepIndex) &&
+          (!target.agentId ||
+            target.agentId === 'all' ||
+            r.getAttribute?.('data-agent-id') === target.agentId)
+      );
+      if (!match) return;
+      patchClasses(match, { 'is-step-flash': true });
+      if (typeof match.offsetTop === 'number' && typeof stepsTablePane.clientHeight === 'number') {
+        stepsTablePane.scrollTop = Math.max(
+          0,
+          match.offsetTop - Math.round(stepsTablePane.clientHeight / 2) + 16
+        );
+      } else if (typeof match.scrollIntoView === 'function') {
+        match.scrollIntoView({ block: 'center' });
+      }
+      if (flashRowTimer) clearTimeout(flashRowTimer);
+      flashRowTimer = setTimeout(() => {
+        flashRowTimer = null;
+        patchClasses(match, { 'is-step-flash': false });
+      }, 1800);
+    }
+
     let prevScope = uiStore.getState().selectedAgentScope;
+    let prevOnlyAnomalies = uiStore.getState().stepsOnlyAnomalies;
 
     const unsubView = uiStore.subscribe(
       (st) => ({
         activeView: st.activeView,
         selectedAgentScope: st.selectedAgentScope,
+        stepsOnlyAnomalies: st.stepsOnlyAnomalies,
+        highlightedStepTarget: st.highlightedStepTarget,
       }),
       (uiSlice) => {
         const scopeChanged = uiSlice.selectedAgentScope !== prevScope;
+        const filterChanged = uiSlice.stepsOnlyAnomalies !== prevOnlyAnomalies;
         prevScope = uiSlice.selectedAgentScope;
+        prevOnlyAnomalies = uiSlice.stepsOnlyAnomalies;
         if (uiSlice.activeView !== 'steps') {
-          if (scopeChanged) isDirty = true;
+          if (scopeChanged || filterChanged) isDirty = true;
           return;
         }
-        if ((isDirty || scopeChanged) && latestSlice) {
+        if ((isDirty || scopeChanged || filterChanged) && latestSlice) {
           isDirty = false;
           renderStepsData(latestSlice);
+        }
+        if (uiSlice.highlightedStepTarget) {
+          focusTargetStepIfRequested(uiSlice.highlightedStepTarget);
         }
       }
     );
 
     onCleanup(() => {
+      cancelHideTurnTip();
+      if (tipCopyTimer.id) clearTimeout(tipCopyTimer.id);
+      if (flashRowTimer) clearTimeout(flashRowTimer);
       stepsTablePane.removeEventListener('scroll', hideTurnTip);
       stepsTbody.removeEventListener('mouseleave', hideTurnTip);
       unsubUi();

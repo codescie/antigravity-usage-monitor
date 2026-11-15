@@ -25,6 +25,10 @@ import {
   trajectoryCache,
 } from './config.mjs';
 import { getContextWindowControlSnapshot } from './context-window-manager.mjs';
+import {
+  evaluateAgentInferenceHealth,
+  mergeAggregatedInferenceHealth,
+} from './inference-health.mjs';
 import { enumerateAndSyncConversations } from './local-scanner.mjs';
 import { callLsRpc, getOfficialQuotaSummary } from './ls-rpc.mjs';
 import {
@@ -359,6 +363,12 @@ function buildAgentUnitTelemetry({
     agentIndex: index,
     isSubagent: !isMain,
   }));
+  const healthSummary = evaluateAgentInferenceHealth(taggedSteps, {
+    agentId,
+    agentLabel,
+    agentBadge: badgeText,
+    isRunning: status === 'CASCADE_RUN_STATUS_RUNNING',
+  });
   const ctxRes = extractActiveContextTelemetry(
     taggedSteps,
     enrichedRes.latestEnriched,
@@ -380,6 +390,7 @@ function buildAgentUnitTelemetry({
     enrichedRes,
     taggedSteps,
     ctxRes,
+    healthSummary,
     telemetryUnit: {
       agentId,
       cascadeId,
@@ -413,6 +424,7 @@ function buildAgentUnitTelemetry({
       context: ctxRes.context,
       ...(includeRecentSteps ? { recentSteps: taggedSteps.slice().reverse() } : {}),
       modelBreakdown,
+      inferenceHealth: healthSummary,
       lastModifiedMs,
     },
   };
@@ -706,6 +718,12 @@ export async function buildTelemetryPayloadInternal(
         }
       : null;
 
+    const aggregatedInferenceHealth = mergeAggregatedInferenceHealth(
+      mainUnit.healthSummary,
+      subAgentTelemetries,
+      allCombinedEnrichedSteps
+    );
+
     aggregatedTelemetry = {
       agentId: 'all',
       cascadeId: activeCascadeId,
@@ -739,6 +757,7 @@ export async function buildTelemetryPayloadInternal(
       activeModelUpstream: latestMetricAgent.activeModelUpstream,
       context: latestMetricAgent.context,
       modelBreakdown: combinedModelBreakdown,
+      inferenceHealth: aggregatedInferenceHealth,
       lastModifiedMs: latestActiveAgent.lastModifiedMs,
     };
   }
@@ -1230,6 +1249,7 @@ export async function buildTelemetryPayloadInternal(
       context,
       recentSteps: enrichedActiveSteps.slice().reverse(),
       modelBreakdown: mainModelBreakdown,
+      inferenceHealth: mainUnit.healthSummary,
       agents: allAgents,
       aggregated: aggregatedTelemetry,
     },

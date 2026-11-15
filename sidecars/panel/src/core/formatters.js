@@ -236,3 +236,66 @@ export function resolveModelDisplayInfo(target, settings = {}, options = {}) {
       : standardText;
   return { text: standardText, title: standardTitle, isOrchestratorSeries: false };
 }
+
+/**
+ * 将指令文本安全复制到系统剪贴板（优先 `navigator.clipboard.writeText`，回退至临时 `<textarea>` 选区复制）。
+ *
+ * @param {string} text
+ * @returns {Promise<boolean>}
+ */
+export async function copyTextToClipboard(text) {
+  const str = String(text ?? '');
+  if (!str) return false;
+  if (typeof window !== 'undefined') {
+    window.__AGLastCopiedText = str;
+  }
+  if (typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(str);
+      return true;
+    } catch {
+      // 受权限限制时自动回退至 DOM execCommand
+    }
+  }
+  if (typeof document !== 'undefined' && typeof document.createElement === 'function') {
+    let ta = null;
+    try {
+      ta = document.createElement('textarea');
+      ta.value = str;
+      if (ta.style) {
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        ta.style.opacity = '0';
+      }
+      document.body?.appendChild?.(ta);
+      ta.select?.();
+      const copied = typeof document.execCommand === 'function' ? document.execCommand('copy') : false;
+      return Boolean(copied || (typeof window !== 'undefined' && window.__AGLastCopiedText === str));
+    } catch {
+      return typeof window !== 'undefined' && window.__AGLastCopiedText === str;
+    } finally {
+      ta?.remove?.();
+    }
+  }
+  return typeof window !== 'undefined' && window.__AGLastCopiedText === str;
+}
+
+/**
+ * 复制文本并驱动单槽位定时反馈回调（如按钮短暂切换为 `已复制` 后自动恢复）。
+ */
+export async function copyWithTimedFeedback(text, timerHolder, onToggle, durationMs = 1500) {
+  const ok = await copyTextToClipboard(text);
+  if (!ok || typeof onToggle !== 'function') return ok;
+  if (timerHolder?.id) {
+    clearTimeout(timerHolder.id);
+    timerHolder.id = null;
+  }
+  onToggle(true);
+  if (timerHolder) {
+    timerHolder.id = setTimeout(() => {
+      timerHolder.id = null;
+      onToggle(false);
+    }, durationMs);
+  }
+  return true;
+}

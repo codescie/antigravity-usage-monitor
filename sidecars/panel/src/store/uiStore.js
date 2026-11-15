@@ -18,4 +18,7 @@ export const uiStore = createReactiveStore({
   detectorProbeMode: 'fast', // 'fast' | 'exact'
   selectedAgentScope: 'all', // 'all' | 'main' | <subagent cascadeId>
   ctxInspectorAgentId: 'auto', // 'auto' | 'main' | <subagent cascadeId>
+  dismissedHealthAlertKey: '',
+  stepsOnlyAnomalies: false,
+  highlightedStepTarget: null,
 });

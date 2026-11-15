@@ -1398,6 +1398,158 @@ test('Compiled app.js mounts dual Shadow DOM hosts, tracks /c/<uuid> routes, pro
       stylesCss.includes('[data-dock="fixed"][data-os="mac"]') && stylesCss.includes('right: 12px'),
       'Compiled styles.css includes macOS 12px fixed fallback right offset'
     );
+
+    // Verify Inference Health alert UI: topbar health dot, hover bar, actionable LiveOverviewView card, step jump/flash, anomaly filter, and dismiss sync
+    const copyCmdText = '我需要打断当前做法：从 #5 步开始出现异常，请先回退或核对 #5 之前的正确状态，再按原目标重新执行。';
+    const healthPayload = {
+      hostPlatform: 'darwin',
+      uiBundleVersion: 'ver-200',
+      settings: { enableWindowOverlay: true },
+      contextWindowControl: { platform: 'darwin', installed: false, supported: true },
+      activeConversation: {
+        cascadeId: 'mac00000-1111-2222-3333-444444444444',
+        title: 'Inference Health Check',
+        isRunning: false,
+        stepCount: 2,
+        context: { totalTokens: 64000, compactionLimitTokens: 256000, limitTokens: 256000 },
+        inferenceHealth: {
+          sessionScore: 61,
+          anomalyStepCount: 1,
+          anomalyTurnCount: 1,
+          turnDiagnoses: [
+            {
+              turnIndex: 1,
+              score: 36,
+              level: 'critical',
+              category: 'replica_drift',
+              badge: '副本漂移',
+              title: '服务端切流/缓存倒退引发质量下滑',
+              summary: '检测到短时前缀缓存异常与思考深度下滑，建议精准回退重来。',
+              anchorStepIndex: 5,
+              agentId: 'main',
+              reasons: ['#5 18s 内缓存倒退 9.9k tok · 思考缺失'],
+              primaryAction: { kind: 'copy', label: '复制 #5 回退指令', copyText: copyCmdText, toast: '已复制回退指令' },
+              secondaryAction: { kind: 'jump_step', label: '定位 #5', stepIndex: 5, agentId: 'main' },
+              alertKey: 'main:T1:replica_drift:36:5:1',
+            },
+          ],
+          activeAlert: {
+            turnIndex: 1,
+            score: 36,
+            level: 'critical',
+            category: 'replica_drift',
+            badge: '副本漂移',
+            title: '服务端切流/缓存倒退引发质量下滑',
+            summary: '检测到短时前缀缓存异常与思考深度下滑，建议精准回退重来。',
+            anchorStepIndex: 5,
+            agentId: 'main',
+            reasons: ['#5 18s 内缓存倒退 9.9k tok · 思考缺失'],
+            primaryAction: { kind: 'copy', label: '复制 #5 回退指令', copyText: copyCmdText, toast: '已复制回退指令' },
+            secondaryAction: { kind: 'jump_step', label: '定位 #5', stepIndex: 5, agentId: 'main' },
+            alertKey: 'main:T1:replica_drift:36:5:1',
+          },
+        },
+        recentSteps: [
+          {
+            stepIndex: 5,
+            turnIndex: 1,
+            isTurnStart: true,
+            turnPrompt: '定位修复推理异常',
+            modelKey: 'MODEL_PLACEHOLDER_M429',
+            modelShort: 'gemini-4-carbon',
+            tokPerSec: 120.5,
+            ttftSec: 2.3,
+            totalDurationSec: 45,
+            isComplete: true,
+            contextTokens: 274000,
+            outputTokens: 6200,
+            cacheHitPct: 82.1,
+            costUsd: 0.19,
+            isCacheAnomaly: true,
+            stepHealthLevel: 'critical',
+            stepHealthBadge: '切流',
+            stepHealthDetail: '18s 内缓存倒退 9.9k tok · 少想狂写',
+            turnHealthScore: 36,
+            turnHealthLevel: 'critical',
+          },
+          {
+            stepIndex: 2,
+            turnIndex: 1,
+            isTurnStart: false,
+            modelKey: 'MODEL_PLACEHOLDER_M429',
+            modelShort: 'gemini-4-carbon',
+            tokPerSec: 65,
+            ttftSec: 1.5,
+            totalDurationSec: 12,
+            isComplete: true,
+            contextTokens: 264000,
+            outputTokens: 400,
+            cacheHitPct: 98.5,
+            costUsd: 0.04,
+            isCacheAnomaly: false,
+            stepHealthLevel: 'healthy',
+            stepHealthBadge: '',
+            stepHealthDetail: '',
+            turnHealthScore: 36,
+            turnHealthLevel: 'critical',
+          },
+        ],
+      },
+      consumption: { selectedRange: { key: 'today', label: '今天', startMs: 1, endMs: 2 }, session: {}, account: {}, trendSeries: [], monthlySeries: [] },
+      quotas: null,
+      modelBreakdown: [],
+    };
+    mockWindow.fetch = async (url) => {
+      if (String(url).includes('/api/telemetry')) {
+        return { ok: true, status: 200, json: async () => healthPayload };
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+    refreshBtn.dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 260));
+
+    const healthDot = capsuleHost.shadowRoot.querySelector('.wm-health-dot');
+    const hoverHealthBar = hoverTipEl.querySelector('.wm-hover-health-bar');
+    const healthAlertPanel = popoverEl.querySelector('.health-alert-panel');
+    assert.ok(healthDot, 'Topbar capsule health dot mounted');
+    assert.equal(healthDot.hasAttribute('hidden'), false, 'Health dot visible when activeAlert is present');
+    assert.equal(healthDot.classList.contains('is-critical'), true);
+    assert.ok(hoverHealthBar, 'Hover health bar mounted');
+    assert.equal(hoverHealthBar.hasAttribute('hidden'), false);
+    assert.equal(hoverTipEl.children.length, 4, 'Hover tip preserves exact 4-child invariant');
+    assert.ok(healthAlertPanel, 'Overview health alert panel mounted');
+    assert.equal(healthAlertPanel.hasAttribute('hidden'), false);
+
+    const primaryHealthBtn = healthAlertPanel.querySelector('.btn-health-action');
+    assert.ok(primaryHealthBtn && primaryHealthBtn.classList.contains('is-primary'));
+    primaryHealthBtn.dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(mockWindow.__AGLastCopiedText, copyCmdText, 'Primary action copies tailored recovery prompt');
+
+    const secondaryHealthBtns = healthAlertPanel.querySelectorAll('.btn-health-action');
+    const jumpStepBtn = secondaryHealthBtns[1];
+    jumpStepBtn.dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const stepsBody2 = popoverEl.querySelector('.steps-data-table').children[1];
+    assert.equal(stepsBody2.children.length, 2, 'Jump switches to StepsDetailView with both steps');
+    assert.equal(stepsBody2.children[0].classList.contains('is-step-flash'), true, 'Target step row #5 flashes on jump');
+    assert.equal(stepsBody2.children[0].querySelector('.step-health-tag').textContent, '切流');
+
+    const anomalyFilterBtn = popoverEl.querySelector('.steps-anomaly-filter-btn');
+    assert.ok(anomalyFilterBtn && !anomalyFilterBtn.hasAttribute('hidden'));
+    anomalyFilterBtn.dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(stepsBody2.children.length, 1, 'Anomaly filter narrows StepsDetailView to anomalous rows only');
+    assert.equal(stepsBody2.children[0].getAttribute('data-step-index'), '5');
+
+    pillTabs[0].dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 15));
+    const dismissBtn = healthAlertPanel.querySelector('.health-dismiss-btn');
+    dismissBtn.dispatchEvent({ type: 'click', stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(healthAlertPanel.hasAttribute('hidden'), true, 'Dismissing hides LiveOverviewView alert panel');
+    assert.equal(healthDot.hasAttribute('hidden'), true, 'Dismissing also clears topbar capsule health dot');
   } finally {
     mockWindow.__AGUsageMonitorOverlay?.dispose?.();
     assert.equal(mockDocument.getElementById('ag-usage-monitor-capsule'), null);

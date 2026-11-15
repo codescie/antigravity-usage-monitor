@@ -624,6 +624,151 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
     return Boolean(step.userInput && typeof step.userInput === 'object');
   };
 
+  const ihNormalizeFileKey = (rawPath) => {
+    if (typeof rawPath !== 'string' || !rawPath.trim()) return '';
+    let cleaned = unwrapArgString(rawPath).replace(/^file:\/\/\/?/i, '');
+    try {
+      if (cleaned.includes('%')) cleaned = decodeURIComponent(cleaned);
+    } catch {
+      // 忽略 URI 解码异常
+    }
+    cleaned = cleaned.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    const parts = cleaned.split('/').filter(Boolean);
+    return parts.slice(-3).join('/') || cleaned;
+  };
+
+  const ihComputeFourGramRepeatRatio = (text) => {
+    if (typeof text !== 'string' || text.length < 320) return 0;
+    const bounded = text.slice(0, 8192);
+    const words = bounded.split(/\s+/).filter((w) => w.length >= 2);
+    if (words.length < 60) return 0;
+    const n = 4;
+    const seen = new Set();
+    const totalWindows = words.length - n + 1;
+    for (let i = 0; i < totalWindows; i++) {
+      seen.add(`${words[i]}\u0001${words[i + 1]}\u0001${words[i + 2]}\u0001${words[i + 3]}`);
+    }
+    return +Math.max(0, 1 - seen.size / totalWindows).toFixed(3);
+  };
+
+  const ihIsTestRunnerCommand = (cmd) =>
+    /\b(?:npm\s+test|pnpm\s+test|yarn\s+test|bun\s+test|node\s+--test|pytest|py\.test|jest|vitest|cargo\s+test|go\s+test|tsc\b|eslint\b|biome\b)/i.test(
+      String(cmd || '')
+    );
+
+  const ihIsInlineScriptCrash = (cmd, resultText) => {
+    const c = String(cmd || '');
+    const r = String(resultText || '');
+    const looksInline =
+      /(?:python3?\s+-c|node\s+-e|powershell(?:\.exe)?\s|^\s*\$|\|\s*node\s+-)/i.test(c) ||
+      r.includes('JSONDecodeError:') ||
+      r.includes('SyntaxError:');
+    if (!looksInline) return false;
+    return /(?:SyntaxError:|JSONDecodeError:|IndentationError:|ParserError|Unexpected token|Unterminated string|CommandNotFoundException)/i.test(
+      r
+    );
+  };
+
+  const ihIsEditToolFailure = (resultStep) => {
+    if (!resultStep || typeof resultStep !== 'object') return false;
+    const st = String(resultStep.status || '').toUpperCase();
+    if (st.includes('ERROR') || Boolean(resultStep.error)) return true;
+    const txt = String(resultStep.content || '');
+    return /(?:Encountered error in tool execution|Target[^\n]{0,40}not found|exact match|Failed to (?:edit|replace|apply)|could not find target|file does not exist|ENOENT)/i.test(
+      txt
+    );
+  };
+
+  const ihIsGitRollbackCommand = (cmd) =>
+    /\bgit\b[^\n]*(?:\bcheckout\s+(?:HEAD\s+)?--|\brestore\b(?:\s+--staged|\s+--worktree|\s+[^\s-])|\breset\s+--hard\b)/i.test(
+      String(cmd || '')
+    );
+
+  const ihIsUserRejectionPrompt = (promptText) =>
+    /(?:打断|重做|重新做|重新调整|很糟糕|太糟糕|做法很糟|很不满意|全错了|改错了|回退|回滚|撤销|不要这样|完全不对|start over|revert|terrible|all wrong)/i.test(
+      String(promptText || '')
+    );
+
+  const ihExtractToolMeta = (rawToolCall, fallbackStep = null) => {
+    const info = summarizeToolCall(rawToolCall, fallbackStep);
+    const stepToolCall = fallbackStep?.metadata?.toolCall || {};
+    let args = {};
+    let rawArgsStr = '';
+    const candidateArgs =
+      rawToolCall?.args ??
+      rawToolCall?.arguments ??
+      rawToolCall?.argumentsJson ??
+      rawToolCall?.function?.arguments ??
+      stepToolCall?.argumentsJson;
+    if (candidateArgs && typeof candidateArgs === 'object') {
+      args = candidateArgs;
+    } else if (typeof candidateArgs === 'string' && candidateArgs.trim()) {
+      rawArgsStr = candidateArgs.trim();
+      try {
+        const parsed = JSON.parse(rawArgsStr);
+        if (parsed && typeof parsed === 'object') args = parsed;
+      } catch {
+        // 忽略未闭合 JSON
+      }
+    }
+    const stepPayload =
+      fallbackStep?.runCommand ||
+      fallbackStep?.commandStatus ||
+      fallbackStep?.viewFile ||
+      fallbackStep?.readFile ||
+      fallbackStep?.codeAction ||
+      fallbackStep?.editFile ||
+      fallbackStep?.replaceFileContent ||
+      fallbackStep?.writeToFile ||
+      null;
+    const pick = (keys) => {
+      for (const k of keys) {
+        const a = unwrapArgString(args?.[k]);
+        if (a) return a;
+        const camel = k.charAt(0).toLowerCase() + k.slice(1);
+        const ac = unwrapArgString(args?.[camel]);
+        if (ac) return ac;
+        if (stepPayload && typeof stepPayload === 'object') {
+          const sp = unwrapArgString(stepPayload[k] ?? stepPayload[camel]);
+          if (sp) return sp;
+        }
+      }
+      return extractPartialJsonStringField(rawArgsStr, keys);
+    };
+    const rawPath = pick([
+      'Path',
+      'TargetFile',
+      'AbsolutePath',
+      'AbsolutePathUri',
+      'FilePath',
+      'File',
+      'Uri',
+    ]);
+    const cmd = pick(['CommandLine', 'Command', 'command']);
+    const startRaw = Number(pick(['StartLine', 'startLine']));
+    const endRaw = Number(pick(['EndLine', 'endLine']));
+    const startLine = Number.isInteger(startRaw) && startRaw > 0 ? startRaw : 1;
+    const endLine =
+      Number.isInteger(endRaw) && endRaw >= startLine ? endRaw : startLine + 799;
+    return {
+      nameLower: info.toolName,
+      normPath: ihNormalizeFileKey(rawPath),
+      startLine,
+      endLine,
+      cmd,
+    };
+  };
+
+  let pendingUpstreamErrorCount = 0;
+  let pendingUpstreamErrorText = '';
+  let inExecutionPhase = false;
+  let justSwitchedExecPhase = false;
+  const fileVersionMap = new Map();
+  const fileReadsMap = new Map();
+  const turnFileEditsMap = new Map();
+  let awaitingRollbackConfirmForTurn = null;
+  let rollbackLookaheadRemaining = 0;
+
   const extractUserTurnPrompt = (step) => {
     const ui = step?.userInput;
     let raw = '';
@@ -659,8 +804,24 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
   };
 
   rawSteps.forEach((s, index) => {
+    if (isCheckpointStep(s)) {
+      fileReadsMap.clear();
+    }
+
     if (isUserTurnBoundary(s)) {
       const promptText = extractUserTurnPrompt(s);
+      turnFileEditsMap.clear();
+      inExecutionPhase = false;
+      justSwitchedExecPhase = false;
+      if (activeTurnIndex !== null && ihIsUserRejectionPrompt(promptText)) {
+        for (const prevStep of result) {
+          if (prevStep.turnIndex === activeTurnIndex && prevStep.healthSignals) {
+            prevStep.healthSignals.userRejectedTurn = true;
+          }
+        }
+        awaitingRollbackConfirmForTurn = activeTurnIndex;
+        rollbackLookaheadRemaining = 4;
+      }
       if (!hasUnconsumedTurn) {
         hasUnconsumedTurn = true;
         pendingTurnPrompts = promptText ? [promptText] : [];
@@ -670,11 +831,41 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       ) {
         pendingTurnPrompts.push(promptText);
       }
+    } else {
+      const stTypeUpper = String(s?.type || '').toUpperCase();
+      if (stTypeUpper.includes('SYSTEM') && typeof s?.content === 'string') {
+        if (
+          s.content.includes('Plan mode is off') ||
+          s.content.includes('runs on the execution model')
+        ) {
+          inExecutionPhase = true;
+          justSwitchedExecPhase = true;
+        } else if (s.content.includes('[plan review]')) {
+          inExecutionPhase = false;
+          justSwitchedExecPhase = false;
+        }
+      }
     }
 
     const m = s?.metadata;
     const u = m?.modelUsage || m?.retryInfos?.[0]?.usage;
     if (!u) {
+      const stTypeUpper = String(s?.type || '').toUpperCase();
+      if (stTypeUpper.includes('ERROR') || s?.error || s?.errorMessage) {
+        const rawErr = String(s?.error || s?.errorMessage || s?.content || '');
+        pendingUpstreamErrorCount += 1;
+        if (!pendingUpstreamErrorText) {
+          if (/http2:\s*timeout/i.test(rawErr)) {
+            pendingUpstreamErrorText = 'http2: timeout awaiting response headers';
+          } else if (/\b429\b|RESOURCE_EXHAUSTED|rate.?limit/i.test(rawErr)) {
+            pendingUpstreamErrorText = '上游 429 限流重试';
+          } else if (/\b503\b|\b502\b|\b504\b|UNAVAILABLE|DEADLINE_EXCEEDED/i.test(rawErr)) {
+            pendingUpstreamErrorText = '上游网关超时/不可用 (5xx)';
+          } else {
+            pendingUpstreamErrorText = cleanSingleLineSnippet(rawErr, 72) || '上游请求失败重试';
+          }
+        }
+      }
       return;
     }
 
@@ -813,6 +1004,154 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
         ? 'Orchestrator Worker (Hydrogen)'
         : rawDisplayName;
 
+    const childToolSteps = [];
+    for (let k = index + 1; k < rawSteps.length; k++) {
+      const cand = rawSteps[k];
+      if (!cand || typeof cand !== 'object') continue;
+      if (cand?.metadata?.modelUsage || cand?.metadata?.retryInfos?.[0]?.usage) break;
+      if (isPlannerStep(cand) || isUserTurnBoundary(cand) || isCheckpointStep(cand)) break;
+      if (isAuxiliaryMetaStep(cand)) continue;
+      const ct = String(cand.type || '').toUpperCase();
+      if (ct.includes('ERROR') || ct.includes('SYSTEM')) continue;
+      childToolSteps.push(cand);
+    }
+
+    const pToolsList = getStepPlannerToolCalls(s);
+    const toolPairs =
+      pToolsList.length > 0
+        ? pToolsList.map((tc, tIdx) => ({ tc, child: childToolSteps[tIdx] || null }))
+        : childToolSteps.map((child) => ({ tc: null, child }));
+
+    let editAttemptCount = 0;
+    let editFaultCount = 0;
+    let toolFaultCount = 0;
+    let amnesiaReadCount = 0;
+    let maxSameFileTurnEdits = 0;
+    let isMutationStep = false;
+    let triggersExecPhaseNext = false;
+    let exitsExecPhaseNow = false;
+    const currentResultOrd = result.length;
+
+    if (awaitingRollbackConfirmForTurn !== null) {
+      rollbackLookaheadRemaining -= 1;
+    }
+
+    for (const { tc, child } of toolPairs) {
+      const meta = ihExtractToolMeta(tc, child);
+      const tName = meta.nameLower;
+      if (tName === 'exit_plan_mode') {
+        triggersExecPhaseNext = true;
+      } else if (tName === 'enter_plan_mode') {
+        exitsExecPhaseNow = true;
+      } else if (tName === 'read_file' || tName === 'view_file') {
+        if (meta.normPath && !ihIsEditToolFailure(child)) {
+          const curVer = fileVersionMap.get(meta.normPath) || 0;
+          const prevReads = fileReadsMap.get(meta.normPath) || [];
+          const reqLen = Math.max(1, meta.endLine - meta.startLine + 1);
+          const isAmnesiaDup = prevReads.some((pr) => {
+            if (pr.version !== curVer || currentResultOrd - pr.stepOrd > 10) return false;
+            const overlap = Math.max(
+              0,
+              Math.min(meta.endLine, pr.end) - Math.max(meta.startLine, pr.start) + 1
+            );
+            return overlap / reqLen >= 0.6;
+          });
+          if (isAmnesiaDup) {
+            amnesiaReadCount += 1;
+          }
+          prevReads.push({
+            start: meta.startLine,
+            end: meta.endLine,
+            version: curVer,
+            stepOrd: currentResultOrd,
+          });
+          if (prevReads.length > 8) prevReads.shift();
+          fileReadsMap.set(meta.normPath, prevReads);
+        }
+      } else if (
+        tName === 'edit_file' ||
+        tName === 'replace_file_content' ||
+        tName === 'multi_replace_file_content' ||
+        tName === 'edit_notebook'
+      ) {
+        isMutationStep = true;
+        editAttemptCount += 1;
+        if (child && ihIsEditToolFailure(child)) {
+          editFaultCount += 1;
+        } else if (meta.normPath) {
+          fileVersionMap.set(meta.normPath, (fileVersionMap.get(meta.normPath) || 0) + 1);
+          const nextTurnEdits = (turnFileEditsMap.get(meta.normPath) || 0) + 1;
+          turnFileEditsMap.set(meta.normPath, nextTurnEdits);
+          if (nextTurnEdits > maxSameFileTurnEdits) {
+            maxSameFileTurnEdits = nextTurnEdits;
+          }
+        }
+      } else if (tName === 'write_file' || tName === 'write_to_file') {
+        isMutationStep = true;
+        if (meta.normPath) {
+          fileVersionMap.set(meta.normPath, (fileVersionMap.get(meta.normPath) || 0) + 1);
+        }
+      } else if (tName === 'run_command') {
+        isMutationStep = true;
+        const resultStr = String(child?.content || child?.error || '');
+        if (!ihIsTestRunnerCommand(meta.cmd) && ihIsInlineScriptCrash(meta.cmd, resultStr)) {
+          toolFaultCount += 1;
+        }
+        if (
+          awaitingRollbackConfirmForTurn !== null &&
+          rollbackLookaheadRemaining >= 0 &&
+          ihIsGitRollbackCommand(meta.cmd)
+        ) {
+          for (const prevStep of result) {
+            if (prevStep.turnIndex === awaitingRollbackConfirmForTurn && prevStep.healthSignals) {
+              prevStep.healthSignals.confirmedRollback = true;
+            }
+          }
+          awaitingRollbackConfirmForTurn = null;
+          rollbackLookaheadRemaining = 0;
+        }
+      }
+    }
+    if (awaitingRollbackConfirmForTurn !== null && rollbackLookaheadRemaining <= 0) {
+      awaitingRollbackConfirmForTurn = null;
+    }
+
+    const hasThinkingText = getStepThinkingText(s).length > 0;
+    const retryCount = Math.max(0, (Array.isArray(m?.retryInfos) ? m.retryInfos.length : 0) - 1);
+    const wasCanceled =
+      /CANCEL/i.test(String(s?.status || '')) ||
+      childToolSteps.some((cs) => /CANCEL/i.test(String(cs?.status || '')));
+    const outputRepeatRatio = ihComputeFourGramRepeatRatio(getStepResponseText(s));
+    const stepInExecutionPhase = exitsExecPhaseNow ? false : inExecutionPhase;
+
+    const healthSignals = {
+      upstreamErrorCount: pendingUpstreamErrorCount,
+      upstreamErrorText: pendingUpstreamErrorText,
+      retryCount,
+      editAttemptCount,
+      editFaultCount,
+      toolFaultCount,
+      amnesiaReadCount,
+      maxSameFileTurnEdits,
+      isMutationStep,
+      inExecutionPhase: stepInExecutionPhase,
+      justSwitchedExecPhase,
+      hasThinkingText,
+      wasCanceled,
+      outputRepeatRatio,
+      userRejectedTurn: false,
+      confirmedRollback: false,
+    };
+
+    pendingUpstreamErrorCount = 0;
+    pendingUpstreamErrorText = '';
+    justSwitchedExecPhase = false;
+    if (triggersExecPhaseNext) {
+      inExecutionPhase = true;
+    } else if (exitsExecPhaseNow) {
+      inExecutionPhase = false;
+    }
+
     result.push({
       stepIndex,
       isCompactionStep,
@@ -854,6 +1193,7 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       turnIndex: activeTurnIndex,
       isTurnStart: stepIsTurnStart,
       ...(stepIsTurnStart && stepTurnPrompt ? { turnPrompt: stepTurnPrompt } : {}),
+      healthSignals,
     });
   });
 
