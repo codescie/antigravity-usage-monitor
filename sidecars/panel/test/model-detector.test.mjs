@@ -158,23 +158,51 @@ test('Model detector loads verified seed-bank.zip and maps Antigravity model IDs
     'claude-sonnet-5.5'
   );
 
-  // Unenrolled models return null for open-world identification, and automatically match once enrolled
+  // Gemini 4 Hydrogen is enrolled in the 70-model reference bank
+  assert.ok(engine.modelCount >= 70, 'Updated seed bank should contain >= 70 models including Hydrogen');
   assert.equal(
     env.suggestAntigravityReference(
       'gemini-4-hydrogen-medium',
       choices,
       'Gemini 4 Hydrogen (Medium)'
     ),
-    null
+    'gemini-4-hydrogen'
   );
-  const futureChoices = [...choices, 'gemini-4-hydrogen'];
+
+  // Unenrolled future models return null (and never falsely claim 同源相近), then automatically match once enrolled
   assert.equal(
     env.suggestAntigravityReference(
-      'gemini-4-hydrogen-medium',
-      futureChoices,
-      'Gemini 4 Hydrogen (Medium)'
+      'gemini-4-oxygen-medium',
+      choices,
+      'Gemini 4 Oxygen (Medium)'
     ),
-    'gemini-4-hydrogen'
+    null
+  );
+  const unenrolledVerdict = env.compareForDisplay(
+    { primary: ['gemini-4-carbon', 'gemini-4-argon', 'gemini-3.8-flash'] },
+    'unknown'
+  );
+  assert.equal(unenrolledVerdict.state, 'unset');
+  const unenrolledSummary = env.formatDiagnosisSummary({
+    claimed: 'gemini-4-oxygen-medium',
+    claimedLabel: 'Gemini 4 Oxygen (Medium)',
+    reference: 'unknown',
+    topCandidate: { model: 'gemini-4-carbon', family: 'gemini', familyName: 'Gemini' },
+    displayVerdict: unenrolledVerdict,
+    unresolved: ['gemini-4-carbon', 'gemini-4-argon'],
+    sharedDecision: 'scored',
+  });
+  assert.equal(unenrolledSummary.badge, '指纹识别');
+  assert.match(unenrolledSummary.detail, /暂未单独收录/);
+
+  const futureChoices = [...choices, 'gemini-4-oxygen'];
+  assert.equal(
+    env.suggestAntigravityReference(
+      'gemini-4-oxygen-medium',
+      futureChoices,
+      'Gemini 4 Oxygen (Medium)'
+    ),
+    'gemini-4-oxygen'
   );
 });
 
@@ -548,6 +576,9 @@ test('syncDetectorBank verifies SHA-256 hashes on remote manifest updates and re
     userStatus: buildSampleUserStatus(),
     remoteFetch: async (url) => {
       const u = String(url);
+      if (u.includes('raw.githubusercontent.com')) {
+        return { ok: false, status: 404 };
+      }
       if (u.endsWith('/asset-manifest.json')) {
         manifestDownloads += 1;
         if (!tamperDetectorSha) {

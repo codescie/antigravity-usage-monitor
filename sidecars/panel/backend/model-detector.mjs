@@ -41,6 +41,7 @@ import {
   REQUIRED_BANK_ASSETS,
   buildEngineFromBuffers,
   buildFullDiagnosis,
+  buildPrimaryJsonFromUnifiedBank,
   diffManifestAssets,
   generateChallengeSet,
   parseNumbers,
@@ -60,6 +61,8 @@ const DETECTOR_STATE_FILE = join(DETECTOR_DATA_DIR, 'state.json');
 const DETECTOR_HISTORY_FILE = join(DETECTOR_DATA_DIR, 'history.json');
 
 const MODELDIAL_BASE_URL = 'https://modeldial.com/fingerprint-v1';
+const LM_DETECTOR_UPSTREAM_BASE_URL =
+  'https://raw.githubusercontent.com/Ikaleio/lm-detector/main/data';
 const BANK_SYNC_TTL_MS = 6 * 3600 * 1000;
 const BANK_SYNC_RETRY_COOLDOWN_MS = 5 * 60 * 1000;
 const MODEL_CATALOG_CACHE_TTL_MS = 2500;
@@ -263,8 +266,33 @@ async function fetchDetectorAssetBuffer(relPath, assetMeta) {
   return Buffer.from(await rawRes.arrayBuffer());
 }
 
+function loadCurrentBankBuffers() {
+  const manifestPath = join(DETECTOR_BANK_DIR, 'asset-manifest.json');
+  if (existsSync(manifestPath)) {
+    const map = new Map();
+    map.set('asset-manifest.json', readFileSync(manifestPath));
+    let complete = true;
+    for (const rel of REQUIRED_BANK_ASSETS) {
+      const full = join(DETECTOR_BANK_DIR, ...rel.split('/'));
+      if (!existsSync(full)) {
+        complete = false;
+        break;
+      }
+      map.set(rel, readFileSync(full));
+    }
+    if (complete) return map;
+  }
+  if (existsSync(SEED_BANK_ZIP_FILE)) {
+    return readZipEntries(readFileSync(SEED_BANK_ZIP_FILE));
+  }
+  return null;
+}
+
 /**
- * 检查并增量同步 ModelDial 最新数字指纹库（SHA-256 强校验）。
+ * 检查并增量同步数字指纹库（双源择优 + 防降级 + SHA-256 强校验）：
+ * 1. 检查 `modeldial.com` 镜像清单，校验哈希并更新辅助库或规则（若镜像主库版本落后于本地则防降级跳过主库覆盖）；
+ * 2. 同时穿透检查上游权威仓库 `Ikaleio/lm-detector` 最新 `unified_bank.json` + `shared_detector.bin`，
+ *    当上游已收录新模型（如 `gemini-4-hydrogen`）而 `modeldial.com` 尚未重部署时，自动拉取并二进制对齐校验后热更新。
  *
  * @param {{ force?: boolean }} [options]
  */
@@ -298,21 +326,196 @@ export async function syncDetectorBank({ force = false } = {}) {
   modelDetectorRuntime.bankSyncInFlight = (async () => {
     modelDetectorRuntime.isBankSyncing = true;
     try {
-      const manifestRes = await fetch(`${MODELDIAL_BASE_URL}/asset-manifest.json`, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        signal: AbortSignal.timeout(12_000),
-      });
-      if (!manifestRes.ok) {
-        throw new Error(`指纹清单请求失败 (HTTP ${manifestRes.status})`);
-      }
-      const remoteManifest = await manifestRes.json();
-      const diff = diffManifestAssets(engine?.manifest || null, remoteManifest);
-      if (!diff.valid) {
-        throw new Error('远端指纹清单格式校验未通过');
+      let workingFiles = loadCurrentBankBuffers();
+      let workingEngine = engine;
+      let hasAnyUpdate = false;
+      let mirrorError = '';
+
+      // 通道 1：检查 ModelDial 发布清单（含 modeltrace.json 与 rules.json）
+      try {
+        const manifestRes = await fetch(`${MODELDIAL_BASE_URL}/asset-manifest.json`, {
+          method: 'GET',
+          headers: { Accept: 'application/json' },
+          signal: AbortSignal.timeout(12_000),
+        });
+        if (!manifestRes.ok) {
+          throw new Error(`指纹清单请求失败 (HTTP ${manifestRes.status})`);
+        }
+        const remoteManifest = await manifestRes.json();
+        const diff = diffManifestAssets(workingEngine?.manifest || null, remoteManifest);
+        if (!diff.valid) {
+          throw new Error('远端指纹清单格式校验未通过');
+        }
+
+        if (diff.changed.length > 0 || !workingEngine) {
+          const mirrorFiles = new Map();
+          const seedEntries =
+            !workingEngine && existsSync(SEED_BANK_ZIP_FILE)
+              ? readZipEntries(readFileSync(SEED_BANK_ZIP_FILE))
+              : null;
+
+          for (const rel of REQUIRED_BANK_ASSETS) {
+            const expectedSha = remoteManifest.assets[rel].sha256;
+            let reuseBuf = null;
+            if (!diff.changed.includes(rel)) {
+              if (workingFiles?.has(rel)) {
+                const b = workingFiles.get(rel);
+                if (sha256Hex(b) === expectedSha) reuseBuf = b;
+              }
+              if (!reuseBuf && seedEntries?.has(rel)) {
+                const b = seedEntries.get(rel);
+                if (sha256Hex(b) === expectedSha) reuseBuf = b;
+              }
+            }
+            if (reuseBuf) {
+              mirrorFiles.set(rel, reuseBuf);
+              continue;
+            }
+            const downloaded = await fetchDetectorAssetBuffer(rel, remoteManifest.assets[rel]);
+            const actualSha = sha256Hex(downloaded);
+            if (actualSha !== expectedSha) {
+              throw new Error(
+                `指纹资产哈希不一致 (${rel}: ${actualSha.slice(0, 10)} != ${expectedSha.slice(0, 10)})`
+              );
+            }
+            mirrorFiles.set(rel, downloaded);
+          }
+
+          mirrorFiles.set(
+            'asset-manifest.json',
+            Buffer.from(JSON.stringify(remoteManifest, null, 2), 'utf8')
+          );
+          const candidateMirrorEngine = buildEngineFromBuffers(mirrorFiles, { source: 'remote' });
+          const curBuiltMs = Date.parse(workingEngine?.builtAt || '') || 0;
+          const mirBuiltMs = Date.parse(candidateMirrorEngine.builtAt || '') || 0;
+          const curCount = Number(workingEngine?.modelCount || 0);
+          const mirCount = Number(candidateMirrorEngine.modelCount || 0);
+
+          // 防降级保护：若本地已持有更新的上游主库，仅合并非主库资产（modeltrace / rules），绝不回退主库模型数
+          const mirrorIsOlderPrimary =
+            Boolean(workingEngine) &&
+            (mirBuiltMs < curBuiltMs || (mirBuiltMs === curBuiltMs && mirCount < curCount));
+
+          if (!mirrorIsOlderPrimary) {
+            workingFiles = mirrorFiles;
+            workingEngine = candidateMirrorEngine;
+            hasAnyUpdate = true;
+          } else if (workingFiles) {
+            const nonPrimaryChanged = diff.changed.filter(
+              (rel) => rel !== 'data/detector.bin' && rel !== 'data/primary.json'
+            );
+            if (nonPrimaryChanged.length > 0) {
+              const mergedFiles = new Map(workingFiles);
+              const mergedManifest = JSON.parse(
+                (workingFiles.get('asset-manifest.json') || Buffer.from('{}')).toString('utf8')
+              );
+              mergedManifest.assets = { ...(mergedManifest.assets || {}) };
+              for (const rel of nonPrimaryChanged) {
+                const buf = mirrorFiles.get(rel);
+                if (buf) {
+                  mergedFiles.set(rel, buf);
+                  mergedManifest.assets[rel] = remoteManifest.assets[rel];
+                }
+              }
+              mergedFiles.set(
+                'asset-manifest.json',
+                Buffer.from(JSON.stringify(mergedManifest, null, 2), 'utf8')
+              );
+              workingEngine = buildEngineFromBuffers(mergedFiles, { source: 'remote' });
+              workingFiles = mergedFiles;
+              hasAnyUpdate = true;
+            }
+          }
+        }
+      } catch (err) {
+        mirrorError = err?.message || String(err);
+        if (/哈希不一致|格式校验/.test(mirrorError)) {
+          throw err;
+        }
       }
 
-      if (diff.changed.length === 0 && engine) {
+      // 通道 2：穿透检查上游权威仓库 Ikaleio/lm-detector 最新主指纹库（解决镜像站滞后问题）
+      if (workingFiles) {
+        try {
+          const ubRes = await fetch(`${LM_DETECTOR_UPSTREAM_BASE_URL}/unified_bank.json`, {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            signal: AbortSignal.timeout(14_000),
+          });
+          if (ubRes && ubRes.ok && typeof ubRes.json === 'function') {
+            const ub = await ubRes.json();
+            if (ub && Array.isArray(ub.models) && ub.models.length > 0) {
+              const upBuiltMs = Date.parse(String(ub.built_at || '')) || 0;
+              const curBuiltMs = Date.parse(String(workingEngine?.builtAt || '')) || 0;
+              const upCount = ub.models.length;
+              const curCount = Number(workingEngine?.modelCount || 0);
+
+              if (!workingEngine || upBuiltMs > curBuiltMs || (upBuiltMs === curBuiltMs && upCount > curCount)) {
+                const binRes = await fetch(
+                  `${LM_DETECTOR_UPSTREAM_BASE_URL}/shared_detector.bin`,
+                  {
+                    method: 'GET',
+                    signal: AbortSignal.timeout(25_000),
+                  }
+                );
+                if (binRes && binRes.ok && typeof binRes.arrayBuffer === 'function') {
+                  const binBuf = Buffer.from(await binRes.arrayBuffer());
+                  const primaryObj = buildPrimaryJsonFromUnifiedBank(ub);
+                  const primaryBuf = Buffer.from(JSON.stringify(primaryObj, null, 2), 'utf8');
+
+                  const upstreamFiles = new Map(workingFiles);
+                  const nextManifest = JSON.parse(
+                    (workingFiles.get('asset-manifest.json') || Buffer.from('{"schema":1,"assets":{}}')).toString(
+                      'utf8'
+                    )
+                  );
+                  nextManifest.assets = { ...(nextManifest.assets || {}) };
+                  nextManifest.assets['data/detector.bin'] = {
+                    sha256: sha256Hex(binBuf),
+                    bytes: binBuf.length,
+                  };
+                  nextManifest.assets['data/primary.json'] = {
+                    sha256: sha256Hex(primaryBuf),
+                    bytes: primaryBuf.length,
+                  };
+                  upstreamFiles.set('data/detector.bin', binBuf);
+                  upstreamFiles.set('data/primary.json', primaryBuf);
+                  upstreamFiles.set(
+                    'asset-manifest.json',
+                    Buffer.from(JSON.stringify(nextManifest, null, 2), 'utf8')
+                  );
+
+                  const verifiedUpstreamEngine = buildEngineFromBuffers(upstreamFiles, {
+                    source: 'remote',
+                  });
+                  workingFiles = upstreamFiles;
+                  workingEngine = verifiedUpstreamEngine;
+                  hasAnyUpdate = true;
+                  mirrorError = '';
+                }
+              }
+            }
+          }
+        } catch {
+          // 上游 GitHub 通道网络受限时静默保留当前有效指纹库
+        }
+      }
+
+      if (!hasAnyUpdate) {
+        if (mirrorError && !workingEngine) {
+          throw new Error(mirrorError);
+        }
+        if (mirrorError) {
+          saveDetectorPersistState({
+            lastCheckedAtMs: Date.now(),
+            lastSyncError: mirrorError,
+          });
+          return {
+            ...getDetectorBankSummary(),
+            updated: false,
+            error: mirrorError,
+          };
+        }
         saveDetectorPersistState({
           lastCheckedAtMs: Date.now(),
           lastSyncError: '',
@@ -325,54 +528,14 @@ export async function syncDetectorBank({ force = false } = {}) {
         };
       }
 
-      const nextFiles = new Map();
-      nextFiles.set(
-        'asset-manifest.json',
-        Buffer.from(JSON.stringify(remoteManifest, null, 2), 'utf8')
-      );
-
-      const seedEntries =
-        !engine && existsSync(SEED_BANK_ZIP_FILE)
-          ? readZipEntries(readFileSync(SEED_BANK_ZIP_FILE))
-          : null;
-
-      for (const rel of REQUIRED_BANK_ASSETS) {
-        const expectedSha = remoteManifest.assets[rel].sha256;
-        let reuseBuf = null;
-        if (!diff.changed.includes(rel)) {
-          const diskFile = join(DETECTOR_BANK_DIR, ...rel.split('/'));
-          if (existsSync(diskFile)) {
-            const b = readFileSync(diskFile);
-            if (sha256Hex(b) === expectedSha) reuseBuf = b;
-          }
-          if (!reuseBuf && seedEntries?.has(rel)) {
-            const b = seedEntries.get(rel);
-            if (sha256Hex(b) === expectedSha) reuseBuf = b;
-          }
-        }
-        if (reuseBuf) {
-          nextFiles.set(rel, reuseBuf);
-          continue;
-        }
-        const downloaded = await fetchDetectorAssetBuffer(rel, remoteManifest.assets[rel]);
-        const actualSha = sha256Hex(downloaded);
-        if (actualSha !== expectedSha) {
-          throw new Error(
-            `指纹资产哈希不一致 (${rel}: ${actualSha.slice(0, 10)} != ${expectedSha.slice(0, 10)})`
-          );
-        }
-        nextFiles.set(rel, downloaded);
-      }
-
-      const verifiedEngine = buildEngineFromBuffers(nextFiles, { source: 'remote' });
       mkdirSync(DETECTOR_BANK_DIR, { recursive: true });
-      for (const [rel, buf] of nextFiles.entries()) {
+      for (const [rel, buf] of workingFiles.entries()) {
         const target = join(DETECTOR_BANK_DIR, ...rel.split('/'));
         mkdirSync(dirname(target), { recursive: true });
         writeFileSync(target, buf);
       }
 
-      modelDetectorRuntime.engine = verifiedEngine;
+      modelDetectorRuntime.engine = workingEngine;
       modelDetectorRuntime.engineError = null;
       const ts = Date.now();
       saveDetectorPersistState({
@@ -380,7 +543,7 @@ export async function syncDetectorBank({ force = false } = {}) {
         lastUpdatedAtMs: ts,
         lastSyncError: '',
         upToDate: true,
-        detectorSha256: verifiedEngine.detectorSha256,
+        detectorSha256: workingEngine.detectorSha256,
       });
 
       return {

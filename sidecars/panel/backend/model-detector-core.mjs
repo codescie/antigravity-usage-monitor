@@ -1379,9 +1379,27 @@ export function compareForDisplay(result, reference) {
   const comparison = compareReference(result, reference);
   const unresolved = unresolvedCandidates(result);
   return unresolved.length &&
-    (!reference || reference === 'unknown' || unresolved.includes(mdCanonical(reference)))
+    reference &&
+    reference !== 'unknown' &&
+    unresolved.includes(mdCanonical(reference))
     ? { ...comparison, state: 'ambiguous' }
     : comparison;
+}
+
+export function buildPrimaryJsonFromUnifiedBank(unifiedBank) {
+  if (!unifiedBank || typeof unifiedBank !== 'object' || !Array.isArray(unifiedBank.models)) {
+    throw new Error('上游 unified_bank.json 格式不合法');
+  }
+  return {
+    built_at: String(unifiedBank.built_at || ''),
+    models: unifiedBank.models.map((m) => ({
+      id: m.id,
+      display_name: m.display_name || m.id,
+      family: m.family,
+      family_name: m.family_name,
+      response_count: m.response_count,
+    })),
+  };
 }
 
 export function formatDiagnosisSummary({
