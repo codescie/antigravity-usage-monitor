@@ -1249,7 +1249,8 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       awaitingRollbackConfirmForTurn = null;
     }
 
-    const hasThinkingText = getStepThinkingText(s).length > 0;
+    const thinkingTextLen = getStepThinkingText(s).length;
+    const hasThinkingText = thinkingTextLen > 0;
     const retryCount = Math.max(0, (Array.isArray(m?.retryInfos) ? m.retryInfos.length : 0) - 1);
     const wasCanceled =
       /CANCEL/i.test(String(s?.status || '')) ||
@@ -1274,6 +1275,7 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       inExecutionPhase: stepInExecutionPhase,
       justSwitchedExecPhase,
       hasThinkingText,
+      thinkingTextLen,
       wasCanceled,
       outputRepeatRatio,
       userRejectedTurn: false,

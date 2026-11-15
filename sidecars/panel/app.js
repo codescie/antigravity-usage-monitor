@@ -6417,13 +6417,23 @@ const StepsDetailView = defineComponent({
           Number(diag.anchorStepIndex) === Number(st.stepIndex)
         ) {
           copyAction = diag.primaryAction;
-        } else if (st.stepHealthBadge === '清零' && st.stepHealthLevel !== 'critical') {
+        } else if (
+          (st.stepHealthBadge === '清零' || st.stepHealthBadge === '切流') &&
+          st.stepHealthLevel !== 'critical'
+        ) {
           copyAction = {
             kind: 'copy',
             label: '复制稳态续写提示',
             copyText:
               '请继续当前任务，修改同一文件时尽量合并相邻块以降低重复预填充开销。',
             toast: '已复制提示',
+          };
+        } else if (st.stepHealthBadge === '缩水' && st.stepHealthLevel !== 'critical') {
+          copyAction = {
+            kind: 'copy',
+            label: `复制 #${st.stepIndex} 核验指令`,
+            copyText: `请复核 #${st.stepIndex} 步的修改边界与潜在遗漏，运行测试确认无误后再继续。`,
+            toast: '已复制核验指令',
           };
         } else {
           copyAction = {

@@ -732,6 +732,10 @@ export async function enumerateAndSyncConversations({
       !Object.prototype.hasOwnProperty.call(
         lastCachedStep.healthSignals,
         'sameRegionReworkCount'
+      ) ||
+      !Object.prototype.hasOwnProperty.call(
+        lastCachedStep.healthSignals,
+        'thinkingTextLen'
       )
     ) {
       return true;

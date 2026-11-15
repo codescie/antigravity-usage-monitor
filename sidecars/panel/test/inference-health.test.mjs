@@ -738,3 +738,179 @@ test('Inference health ignores cross-upstream-model cache shifts and buffered TT
     assert.equal(st.stepHealthBadge, '');
   }
 });
+
+test('Inference health eliminates false underthinking on large write_file, planned multi-edits, and symptom-free turns', async () => {
+  const longPlanThinking = 'A'.repeat(2044);
+  const rawSteps = [
+    mkUserStep('写出完整核心模块并完成多处并行修改与提交', '2026-01-01T09:00:00Z', 0),
+    // Large write_file (21.5k output) with substantive thinking (434 tok): denominator bias must NOT trigger 缩水
+    mkPlannerStep({
+      stepIndex: 806,
+      createdAt: '2026-01-01T09:00:01Z',
+      finishedGeneratingAt: '2026-01-01T09:03:01Z',
+      inputTokens: 5713,
+      cacheReadTokens: 205012,
+      thinkingTokens: 434,
+      responseTokens: 21054,
+      thinkingDuration: '11.5s',
+      thinking: 'Detailed architecture plan '.padEnd(1500, 'x'),
+      toolCalls: [{ name: 'write_file', args: { Path: '/repo/src/core.js', Content: 'export const ok = 1;' } }],
+    }),
+    mkToolResult('write_file', 'ok'),
+    // Deep planning + first edits
+    mkPlannerStep({
+      stepIndex: 1233,
+      createdAt: '2026-01-01T09:03:05Z',
+      finishedGeneratingAt: '2026-01-01T09:03:49Z',
+      inputTokens: 9108,
+      cacheReadTokens: 375975,
+      thinkingTokens: 580,
+      responseTokens: 2937,
+      thinkingDuration: '9.1s',
+      thinking: longPlanThinking,
+      toolCalls: [
+        { name: 'edit_file', args: { Path: '/repo/src/a.js', Target: 'const a = 1;', Replacement: 'const a = 2;' } },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 10 (+1/-1 lines)'),
+    // Immediately following batch edit (0 thinking tokens, 99% cache hit, +3385 tok) inheriting prior plan
+    mkPlannerStep({
+      stepIndex: 1238,
+      createdAt: '2026-01-01T09:04:00Z',
+      finishedGeneratingAt: '2026-01-01T09:04:33Z',
+      inputTokens: 3950,
+      cacheReadTokens: 385084,
+      thinkingTokens: 0,
+      responseTokens: 3385,
+      thinkingDuration: '0s',
+      thinking: '',
+      toolCalls: [
+        { name: 'edit_file', args: { Path: '/repo/src/b.js', Target: 'const b1 = 1;', Replacement: 'const b1 = 2;' } },
+        { name: 'edit_file', args: { Path: '/repo/src/b.js', Target: 'const b2 = 1;', Replacement: 'const b2 = 2;' } },
+        { name: 'edit_file', args: { Path: '/repo/src/b.js', Target: 'const b3 = 1;', Replacement: 'const b3 = 2;' } },
+        { name: 'edit_file', args: { Path: '/repo/src/b.js', Target: 'const b4 = 1;', Replacement: 'const b4 = 2;' } },
+        { name: 'edit_file', args: { Path: '/repo/src/b.js', Target: 'const b5 = 1;', Replacement: 'const b5 = 2;' } },
+        { name: 'edit_file', args: { Path: '/repo/src/b.js', Target: 'const b6 = 1;', Replacement: 'const b6 = 2;' } },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 10 (+1/-1 lines)'),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 30 (+1/-1 lines)'),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 50 (+1/-1 lines)'),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 70 (+1/-1 lines)'),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 90 (+1/-1 lines)'),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 110 (+1/-1 lines)'),
+    // Separate later turn with standalone zero-thinking code edit & clean verification -> symptom-free, score 100
+    mkUserStep('补跑单测并修复小细节', '2026-01-01T09:05:00Z', 2000),
+    mkPlannerStep({
+      stepIndex: 2001,
+      createdAt: '2026-01-01T09:05:02Z',
+      finishedGeneratingAt: '2026-01-01T09:05:10Z',
+      inputTokens: 2000,
+      cacheReadTokens: 390000,
+      thinkingTokens: 0,
+      responseTokens: 950,
+      thinkingDuration: '0s',
+      thinking: '',
+      toolCalls: [
+        { name: 'edit_file', args: { Path: '/repo/src/c.js', Target: 'const c = 1;', Replacement: 'const c = 2;' } },
+        { name: 'run_command', args: { CommandLine: 'npm test' } },
+      ],
+    }),
+    mkToolResult('edit_file', 'Made 1 replacement starting at line 5 (+1/-1 lines)'),
+    mkToolResult('run_command', '112 passed, TEST_EXIT=0'),
+  ];
+
+  const h = backendHarness({
+    trajectories: { cleanThink1: { trajectory: { steps: rawSteps }, numTotalSteps: rawSteps.length } },
+    summaries: { cleanThink1: { stepCount: rawSteps.length, lastModifiedTime: '2026-01-01T09:05:10Z', status: 'IDLE', annotations: { title: 'Clean Planned Edits' } } },
+  });
+  const payload = await h.buildTelemetryPayloadInternal('cleanThink1');
+  const health = payload.activeConversation.inferenceHealth;
+  assert.equal(health.activeAlert, null);
+  assert.equal(health.anomalyStepCount, 0);
+  assert.equal(health.sessionScore, 100);
+  for (const st of payload.activeConversation.recentSteps) {
+    assert.notEqual(st.stepHealthBadge, '缩水');
+  }
+
+  // Genuine compound failure: zeroThinking + edit_file Target not found MUST alert
+  const faultSteps = extractModelSteps([
+    mkUserStep('直接修改目标代码', '2026-01-01T10:00:00Z', 0),
+    mkPlannerStep({
+      stepIndex: 1,
+      createdAt: '2026-01-01T10:00:01Z',
+      finishedGeneratingAt: '2026-01-01T10:00:10Z',
+      inputTokens: 1500,
+      cacheReadTokens: 120000,
+      thinkingTokens: 420,
+      responseTokens: 600,
+    }),
+    mkPlannerStep({
+      stepIndex: 2,
+      createdAt: '2026-01-01T10:00:12Z',
+      finishedGeneratingAt: '2026-01-01T10:00:22Z',
+      inputTokens: 1800,
+      cacheReadTokens: 122000,
+      thinkingTokens: 0,
+      responseTokens: 1100,
+      thinkingDuration: '0s',
+      thinking: '',
+      toolCalls: [
+        { name: 'edit_file', args: { Path: '/repo/src/broken.js', Target: 'missing line', Replacement: 'fixed' } },
+      ],
+    }),
+    mkToolResult('edit_file', 'Target not found', 'CORTEX_STEP_STATUS_ERROR'),
+  ], []);
+  const faultDiag = h.evaluateAgentInferenceHealth(faultSteps);
+  assert.ok(faultDiag.activeAlert, 'Zero-thinking accompanied by edit failure should alert');
+  assert.ok(faultDiag.turnDiagnoses[0].score < 68);
+});
+
+test('Inference health uses non-destructive prescription for pure partial cache mismatch without quality degradation', () => {
+  const steps = extractModelSteps([
+    mkUserStep('查看并同步缓存命中', '2026-01-01T11:00:00Z', 0),
+    mkPlannerStep({
+      stepIndex: 1,
+      createdAt: '2026-01-01T11:00:00Z',
+      finishedGeneratingAt: '2026-01-01T11:00:08Z',
+      cacheReadTokens: 200000,
+      inputTokens: 2000,
+      thinkingTokens: 350,
+      responseTokens: 400,
+    }),
+    mkPlannerStep({
+      stepIndex: 2,
+      createdAt: '2026-01-01T11:00:15Z',
+      finishedGeneratingAt: '2026-01-01T11:00:25Z',
+      cacheReadTokens: 14827,
+      inputTokens: 187000,
+      thinkingTokens: 320,
+      responseTokens: 350,
+    }),
+    mkPlannerStep({
+      stepIndex: 3,
+      createdAt: '2026-01-01T11:00:30Z',
+      finishedGeneratingAt: '2026-01-01T11:00:38Z',
+      cacheReadTokens: 205000,
+      inputTokens: 2500,
+      thinkingTokens: 340,
+      responseTokens: 380,
+    }),
+    mkPlannerStep({
+      stepIndex: 4,
+      createdAt: '2026-01-01T11:00:42Z',
+      finishedGeneratingAt: '2026-01-01T11:00:50Z',
+      cacheReadTokens: 14827,
+      inputTokens: 193000,
+      thinkingTokens: 330,
+      responseTokens: 360,
+    }),
+  ], []);
+
+  const h = backendHarness();
+  const diag = h.evaluateAgentInferenceHealth(steps);
+  assert.ok(diag.activeAlert);
+  assert.equal(diag.activeAlert.badge, '缓存切流');
+  assert.equal(diag.activeAlert.primaryAction.kind, 'jump_step');
+  assert.equal(diag.activeAlert.secondaryAction.kind, 'copy');
+});

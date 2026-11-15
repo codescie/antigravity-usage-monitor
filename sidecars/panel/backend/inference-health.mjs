@@ -54,12 +54,21 @@ function ihSameCachePoolModel(a, b) {
   return true;
 }
 
+function ihModelBucketKey(st) {
+  const mk = st?.modelKey || 'unknown';
+  const sub = String(st?.responseModel || st?.modelShort || '')
+    .replace(/·压缩|\[自动压缩\]/g, '')
+    .trim()
+    .toLowerCase();
+  return sub ? `${mk}::${sub}` : mk;
+}
+
 function ihBuildModelBaselines(chronoSteps, hasPlannerModel) {
   const byModel = new Map();
   for (const st of chronoSteps) {
     if (!st || st.isCompactionStep) continue;
     if (ihIsExecWorkerStep(st, hasPlannerModel)) continue;
-    const key = st.modelKey || 'unknown';
+    const key = ihModelBucketKey(st);
     let entry = byModel.get(key);
     if (!entry) {
       entry = {
@@ -204,6 +213,30 @@ function ihBuildTurnDiagnosis({
     }
   }
 
+  const hasTurnCompanionSymptom = Boolean(
+    infraCount > 0 ||
+      editFaultCount > 0 ||
+      toolFaultCount > 0 ||
+      amnesiaReadCount > 0 ||
+      hasThrashing ||
+      hasHighRepeat ||
+      userRejectedTurn ||
+      confirmedRollback
+  );
+  if ((zeroThinkCount > 0 || burstThinkCount > 0) && hasTurnCompanionSymptom) {
+    for (const st of turnSteps) {
+      const f = stepFindingsMap.get(st);
+      if (f?.thinkProof && !f.proofIncludedThink) {
+        candidateReasons.push({
+          ord: candidateReasons.length,
+          text: `#${st.stepIndex} ${f.thinkProof}`,
+          weight: 20,
+        });
+        f.promotedThink = true;
+      }
+    }
+  }
+
   candidateReasons.sort((a, b) => b.weight - a.weight || a.ord - b.ord);
   const reasons = candidateReasons.slice(0, 3).map((r) => r.text);
 
@@ -249,7 +282,7 @@ function ihBuildTurnDiagnosis({
   }
 
   let dThink = 0;
-  if (zeroThinkCount > 0 || burstThinkCount > 0) {
+  if ((zeroThinkCount > 0 || burstThinkCount > 0) && hasTurnCompanionSymptom) {
     const baseThinkPenalty = zeroThinkCount > 0 ? 24 : 18;
     const compoundBoost = infraCount > 0 ? 10 : 0;
     dThink = Math.min(
@@ -401,6 +434,14 @@ function ihBuildTurnDiagnosis({
       toast: '已复制重审指令',
     };
   } else if (category === 'replica_drift') {
+    const isPureCacheLoss =
+      dThink === 0 &&
+      dFault === 0 &&
+      upstreamCount === 0 &&
+      amnesiaReadCount === 0 &&
+      !hasThrashing &&
+      !userRejectedTurn &&
+      !confirmedRollback;
     if (zeroCacheCount > 0 && partialDriftCount === 0) {
       badge = '缓存清零';
       if (dThink === 0 && dFault === 0 && upstreamCount === 0) {
@@ -434,6 +475,24 @@ function ihBuildTurnDiagnosis({
           toast: '已复制回退指令',
         };
       }
+    } else if (isPureCacheLoss) {
+      badge = '缓存切流';
+      title = '服务端前缀缓存部分失配（计费与首字上升）';
+      summary =
+        '短间隔内请求未完全命中原热缓存副本，导致首字延迟与输入计费上升；当前推理与修改质量未见异常，无需回退代码。';
+      primaryAction = {
+        kind: 'jump_step',
+        label: `定位 ${stepRef}`,
+        stepIndex: anchorStepIndex,
+        agentId,
+      };
+      secondaryAction = {
+        kind: 'copy',
+        label: '复制稳态续写提示',
+        copyText:
+          '请继续当前任务，修改同一文件时尽量合并相邻块以降低重复预填充开销。',
+        toast: '已复制提示',
+      };
     } else {
       badge = '副本漂移';
       title =
@@ -511,6 +570,8 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
   const stepFindingsMap = new Map();
   let prevNonCompact = null;
   let prevIsWorker = false;
+  let activeTurnForPlan = null;
+  let recentTurnPlanCarryover = 0;
 
   for (let i = 0; i < steps.length; i++) {
     const st = steps[i];
@@ -520,6 +581,7 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
     if (st.isCompactionStep) {
       prevNonCompact = null;
       prevIsWorker = false;
+      recentTurnPlanCarryover = 0;
       st.stepHealthLevel = 'healthy';
       st.stepHealthBadge = '';
       st.stepHealthDetail = '';
@@ -528,8 +590,13 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
       continue;
     }
 
+    if (st.turnIndex !== activeTurnForPlan) {
+      activeTurnForPlan = st.turnIndex;
+      recentTurnPlanCarryover = 0;
+    }
+
     const isWorker = ihIsExecWorkerStep(st, hasPlannerModel);
-    const baseline = baselines.get(st.modelKey || 'unknown') || {
+    const baseline = baselines.get(ihModelBucketKey(st)) || {
       demonstratesThinking: false,
       medianThinkShare: 0,
       medianThinkDurShare: 0,
@@ -604,45 +671,8 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
       st.cacheZeroReason = prevNonCompact ? 'low_prefix' : 'cold_start';
     }
 
-    let zeroThinking = false;
-    let burstUnderthinking = false;
-    if (!isWorker && baseline.demonstratesThinking) {
-      const isBufferedTtftResponse =
-        Number.isFinite(st.ttftSec) &&
-        st.ttftSec >= 8 &&
-        (st.totalDurationSec || 0) > 0 &&
-        st.ttftSec / st.totalDurationSec >= 0.75;
-      const qualifiesZeroCheck =
-        !isBufferedTtftResponse &&
-        ((hs.isCodeEditStep && st.outputTokens >= 500) ||
-          st.outputTokens >= 1200 ||
-          ((Boolean(replicaDrift) || upstreamFault) && st.outputTokens >= 600));
-      if (
-        qualifiesZeroCheck &&
-        st.thinkingTokens === 0 &&
-        !hs.hasThinkingText &&
-        (st.thinkingDurationSec || 0) < 0.35
-      ) {
-        zeroThinking = true;
-      } else if ((hs.isMutationStep || st.outputTokens >= 2400) && st.outputTokens >= 2400) {
-        const shareLow =
-          baseline.medianThinkShare >= 0.15 &&
-          st.thinkingTokens > 0 &&
-          st.thinkingTokens / st.outputTokens < Math.min(0.08, baseline.medianThinkShare * 0.3);
-        const durLow =
-          baseline.medianThinkDurShare >= 0.15 &&
-          st.thinkingDurationSec != null &&
-          (st.totalDurationSec || 0) >= 10 &&
-          st.thinkingDurationSec / st.totalDurationSec <
-            Math.min(0.08, baseline.medianThinkDurShare * 0.3);
-        const unsplitBurstAfterInfra =
-          st.thinkingTokens === 0 &&
-          st.outputTokens >= 4500 &&
-          (Boolean(replicaDrift) || upstreamFault || (hs.sameRegionReworkCount || 0) >= 2);
-        if (shareLow || durLow || unsplitBurstAfterInfra) {
-          burstUnderthinking = true;
-        }
-      }
+    if (replicaDrift || upstreamFault || !sameCachePool) {
+      recentTurnPlanCarryover = 0;
     }
 
     const editFaultCount = hs.editFaultCount || 0;
@@ -653,6 +683,76 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
     const thrashingEdits = sameRegionReworkCount >= 3 || oscillationRevertCount >= 2;
     const highRepeat = (hs.outputRepeatRatio || 0) >= 0.55;
     const workerFault = isWorker && (editFaultCount > 0 || toolFaultCount > 0);
+    const hasStepCompanionFault = Boolean(
+      upstreamFault ||
+        replicaDrift ||
+        editFaultCount > 0 ||
+        toolFaultCount > 0 ||
+        amnesiaReadCount > 0 ||
+        thrashingEdits ||
+        highRepeat ||
+        hs.userRejectedTurn ||
+        hs.confirmedRollback
+    );
+
+    const thinkTextLen = Number(hs.thinkingTextLen || 0);
+    const hasSubstantiveThinking =
+      (st.thinkingTokens || 0) >= 60 ||
+      thinkTextLen >= 180 ||
+      (st.thinkingDurationSec || 0) >= 1.5;
+    const inheritedTurnPlan =
+      recentTurnPlanCarryover > 0 &&
+      !hasStepCompanionFault &&
+      Boolean(st.hasToolCalls || hs.isCodeEditStep || hs.isMutationStep);
+
+    let zeroThinking = false;
+    let burstUnderthinking = false;
+    if (
+      !isWorker &&
+      baseline.demonstratesThinking &&
+      !hasSubstantiveThinking &&
+      !inheritedTurnPlan
+    ) {
+      const isBufferedTtftResponse =
+        Number.isFinite(st.ttftSec) &&
+        st.ttftSec >= 8 &&
+        (st.totalDurationSec || 0) > 0 &&
+        st.ttftSec / st.totalDurationSec >= 0.75;
+      const qualifiesZeroCheck =
+        !isBufferedTtftResponse &&
+        (((hs.isCodeEditStep && st.outputTokens >= 800) ||
+          st.outputTokens >= 1600 ||
+          ((Boolean(replicaDrift) || upstreamFault) && st.outputTokens >= 600)) &&
+          (st.thinkingTokens || 0) === 0 &&
+          !hs.hasThinkingText &&
+          (st.thinkingDurationSec || 0) < 0.35);
+      if (qualifiesZeroCheck) {
+        zeroThinking = true;
+      } else if (
+        !isBufferedTtftResponse &&
+        st.outputTokens >= 2800 &&
+        (st.thinkingTokens || 0) < 45
+      ) {
+        const shareLow =
+          baseline.medianThinkShare >= 0.15 &&
+          (st.thinkingTokens || 0) > 0 &&
+          st.thinkingTokens / st.outputTokens < Math.min(0.03, baseline.medianThinkShare * 0.2);
+        const unsplitBurstAfterInfra =
+          (st.thinkingTokens || 0) === 0 &&
+          st.outputTokens >= 4500 &&
+          (Boolean(replicaDrift) || upstreamFault || (hs.sameRegionReworkCount || 0) >= 2);
+        if (shareLow || unsplitBurstAfterInfra) {
+          burstUnderthinking = true;
+        }
+      }
+    }
+
+    const thinkProof = zeroThinking
+      ? `修改/长回复思考缺失 (+${st.outputTokens} tok)`
+      : burstUnderthinking
+        ? `少想狂写 (+${st.outputTokens} tok)`
+        : '';
+    const includeThinkAtStep = Boolean(thinkProof && hasStepCompanionFault);
 
     const proofParts = [];
     if (upstreamFault) {
@@ -671,10 +771,8 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
             : `${replicaDrift.dtSec}s 内热缓存骤降 ${ihFormatCompactTok(replicaDrift.lostTokens)} tok`
       );
     }
-    if (zeroThinking) {
-      proofParts.push(`修改/长回复思考缺失 (+${st.outputTokens} tok)`);
-    } else if (burstUnderthinking) {
-      proofParts.push(`少想狂写 (+${st.outputTokens} tok)`);
+    if (includeThinkAtStep) {
+      proofParts.push(thinkProof);
     }
     if (editFaultCount > 0) {
       proofParts.push(`编辑原文匹配失败 ${editFaultCount} 次`);
@@ -699,10 +797,12 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
       proofParts.push('轻量执行层工具出错');
     }
 
+    const thinkStepPts =
+      zeroThinking || burstUnderthinking ? (hasStepCompanionFault ? 22 : 0) : 0;
     const stepPoints =
       (upstreamFault ? 18 : 0) +
       (replicaDrift ? (replicaDrift.kind === 'cold_zero' ? 24 : 18) : 0) +
-      (zeroThinking || burstUnderthinking ? 22 : 0) +
+      thinkStepPts +
       editFaultCount * 20 +
       toolFaultCount * 16 +
       amnesiaReadCount * 18 +
@@ -716,7 +816,7 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
     else if (editFaultCount > 0 || toolFaultCount > 0) stepBadge = '失误';
     else if (thrashingEdits) stepBadge = '返工';
     else if (amnesiaReadCount > 0) stepBadge = '重读';
-    else if (zeroThinking || burstUnderthinking) stepBadge = '缩水';
+    else if (includeThinkAtStep) stepBadge = '缩水';
     else if (highRepeat) stepBadge = '复读';
 
     const stepLevel =
@@ -738,6 +838,9 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
       replicaDrift,
       zeroThinking,
       burstUnderthinking,
+      thinkProof,
+      proofIncludedThink: includeThinkAtStep,
+      promotedThink: false,
       editFaultCount,
       toolFaultCount,
       amnesiaReadCount,
@@ -747,6 +850,16 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
       stepPoints,
       proof: proofParts[0] || '',
     });
+
+    if (
+      (st.thinkingTokens || 0) >= 80 ||
+      thinkTextLen >= 220 ||
+      (st.thinkingDurationSec || 0) >= 1.8
+    ) {
+      recentTurnPlanCarryover = 2;
+    } else if (recentTurnPlanCarryover > 0) {
+      recentTurnPlanCarryover -= 1;
+    }
 
     prevNonCompact = st;
     prevIsWorker = isWorker;
@@ -787,10 +900,19 @@ export function evaluateAgentInferenceHealth(steps = [], options = {}) {
         if (
           sf &&
           (sf.stepPoints >= 18 ||
+            sf.promotedThink ||
             (st.healthSignals?.confirmedRollback && st.stepIndex === diag.anchorStepIndex))
         ) {
           if (st.stepHealthLevel === 'healthy' || st.stepHealthLevel === 'notice') {
             st.stepHealthLevel = 'warn';
+          }
+          if (sf.promotedThink && !st.stepHealthBadge) {
+            st.stepHealthBadge = '缩水';
+          }
+          if (sf.promotedThink && sf.thinkProof) {
+            st.stepHealthDetail = st.stepHealthDetail
+              ? `${st.stepHealthDetail} · ${sf.thinkProof}`
+              : sf.thinkProof;
           }
           if (!st.stepHealthBadge && st.healthSignals?.confirmedRollback) {
             st.stepHealthBadge = '回滚';
