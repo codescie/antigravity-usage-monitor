@@ -881,10 +881,10 @@ export function isMacHostPlatform(telemetry) {
 
 export function formatContextTierLabel(mode) {
   const norm = String(mode || '').trim().toLowerCase();
-  if (norm === '512k') return '512K';
+  if (norm === '512k') return '旧 512K';
   if (norm === '768k') return '768K';
   if (norm === '1m') return '1M';
-  return '256K';
+  return '原版 512K';
 }
 
 export async function switchContextWindow(mode) {

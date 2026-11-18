@@ -227,7 +227,7 @@ function extractActiveContextTelemetry(
   latestEnriched,
   sessionInputTokens,
   sessionCacheReadTokens,
-  defaultBudgetTokens = 256000,
+  defaultBudgetTokens = 512000,
   liveRunningBudgetTokens = 0
 ) {
   let latestBreakdown = latestEnriched?.contextBreakdown || null;
@@ -270,6 +270,7 @@ function extractActiveContextTelemetry(
   const rawStepBudget = Number(latestEnriched?.maxContextBudgetTokens || 0);
   const isStandardClampTierBudget =
     rawStepBudget === 256000 ||
+    rawStepBudget === 512000 ||
     rawStepBudget === 524288 ||
     rawStepBudget === 786432 ||
     rawStepBudget === 983040 ||
@@ -277,7 +278,7 @@ function extractActiveContextTelemetry(
   const compactionLimitTokens =
     liveRunningBudgetTokens > 0 && (rawStepBudget === 0 || isStandardClampTierBudget)
       ? liveRunningBudgetTokens
-      : Number(rawStepBudget || defaultBudgetTokens || 256000);
+      : Number(rawStepBudget || defaultBudgetTokens || 512000);
   const compactionUsedTokens = Number(
     latestEnriched?.estimatedContextTokens || ctxBreakdownTotal || ctxCached + ctxFreshInput
   );
@@ -345,7 +346,7 @@ function buildAgentUnitTelemetry({
   dynamicModelMap,
   knownUpstreamByModelKey,
   includeRecentSteps = true,
-  defaultBudgetTokens = 256000,
+  defaultBudgetTokens = 512000,
   liveRunningBudgetTokens = 0,
 }) {
   const enrichedRes = enrichActiveConversationSteps(
@@ -452,6 +453,8 @@ export async function buildTelemetryPayloadInternal(
       getContextWindowControlSnapshot().catch(() => null),
     ]);
 
+  // 仅当运行中的二进制处于显式扩容补丁态 (512k/768k/1m) 时才覆盖标准档位预算；
+  // 官方未打补丁原版 (diskMode === '256k') 现已原生下发 512K (512,000) 等动态上限，直接采信步骤真实元数据
   const liveRunningBudgetTokens =
     contextWindowControl?.installed &&
     contextWindowControl?.supported &&
@@ -462,11 +465,9 @@ export async function buildTelemetryPayloadInternal(
           ? 786432
           : contextWindowControl.diskMode === '1m'
             ? 983040
-            : contextWindowControl.diskMode === '256k'
-              ? 256000
-              : 0
+            : 0
       : 0;
-  const defaultBudgetTokens = liveRunningBudgetTokens > 0 ? liveRunningBudgetTokens : 256000;
+  const defaultBudgetTokens = liveRunningBudgetTokens > 0 ? liveRunningBudgetTokens : 512000;
 
   const userStatus = userStatusRes?.userStatus || {};
   const currentAccountName = userStatus?.email || userStatus?.name || '';
@@ -989,7 +990,7 @@ export async function buildTelemetryPayloadInternal(
 
     let contextUsedPct = null;
     if (lastRootStep) {
-      const limitTokens = Number(lastRootStep.maxContextBudgetTokens || 256000);
+      const limitTokens = Number(lastRootStep.maxContextBudgetTokens || defaultBudgetTokens || 512000);
       const cb = lastRootStep.contextBreakdown;
       const cbTotal = cb
         ? Number(cb.messagesTokens || 0) +

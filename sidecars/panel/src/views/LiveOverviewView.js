@@ -661,30 +661,31 @@ export const LiveOverviewView = defineComponent({
       hidden: true,
       text: '主代理',
     });
-    const ctxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
+    const ctxSummaryText = h('span', { className: 'text-mono', text: '0 / 512.0k (0%)' });
     const ctxSegmentBar = ContextSegmentMeter({ context: {} });
 
     const ctxTierStatusEl = h('span', {
       className: 'ctx-tier-status',
-      text: '压缩水位 · 原版',
+      text: '压缩水位 · 官方默认 (512K)',
     });
     const ctxTierDefs = [
       {
         key: '256k',
-        label: '256K',
-        hint: '压缩水位 · 原版',
-        title: '切回 256K 官方原版水位 (256,000 tokens · 从原版备份字节级还原)',
+        label: '原版 512K',
+        hint: '压缩水位 · 官方默认 (512K)',
+        title: '使用 Google 官方原版二进制 (现已原生默认支持 512K 上下文 · 从原版备份字节级还原)',
       },
       {
         key: '512k',
-        label: '512K',
-        hint: '压缩水位 · 均衡',
-        title: '切换至 512K 日常均衡水位 (524,288 tokens · 兼顾缓存命中与跨模块记忆)',
+        label: '旧 512K',
+        hint: '压缩水位 · 旧版 512K 补丁',
+        title: '旧版 512K 二进制补丁档位 (官方现已原生支持 512K，建议切回「原版 512K」)',
+        legacyOnly: true,
       },
       {
         key: '768k',
         label: '768K',
-        hint: '压缩水位 · 深度',
+        hint: '压缩水位 · 深度扩容 (768K)',
         title: '切换至 768K 深度攻坚水位 (786,432 tokens · 预留 256Ki 思考与输出安全区)',
       },
       {
@@ -1311,6 +1312,7 @@ export const LiveOverviewView = defineComponent({
       if (showCtxTierBar) {
         const activeMode = String(ctxCtrl.mode || '256k').toLowerCase();
         const activeLabel = formatContextTierLabel(activeMode);
+        const showLegacy512k = activeMode === '512k' || ctxCtrl.diskMode === '512k';
         const showLegacy1m = activeMode === '1m' || ctxCtrl.diskMode === '1m';
         const activeErr = ctxSwitchErrorMsg || ctxCtrl.lastError || '';
         const matchedTier = ctxTierButtons.find((t) => t.key === activeMode);
@@ -1346,7 +1348,8 @@ export const LiveOverviewView = defineComponent({
 
         for (const item of ctxTierButtons) {
           if (item.legacyOnly) {
-            patchAttr(item.btn, 'hidden', !showLegacy1m);
+            const showLegacy = item.key === '512k' ? showLegacy512k : showLegacy1m;
+            patchAttr(item.btn, 'hidden', !showLegacy);
           }
           const isActive = item.key === activeMode;
           patchAttr(item.btn, 'disabled', !ctxCtrl.supported || isSwitchingContext);
@@ -1358,10 +1361,14 @@ export const LiveOverviewView = defineComponent({
         }
       }
 
-      const fallbackLimit =
-        ctxCtrl?.installed && ctxCtrl?.runningMatchesDisk && ctxCtrl?.targetTokens
-          ? ctxCtrl.targetTokens
-          : 256000;
+      const isPatchedRunning =
+        ctxCtrl?.installed &&
+        ctxCtrl?.runningMatchesDisk &&
+        ctxCtrl?.diskMode &&
+        ctxCtrl.diskMode !== '256k' &&
+        ctxCtrl.diskMode !== 'unknown' &&
+        ctxCtrl?.targetTokens;
+      const fallbackLimit = isPatchedRunning ? ctxCtrl.targetTokens : 512000;
       const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || fallbackLimit);
       const totalTokens = Number(ctx.totalTokens || 0);
       const usedPct =

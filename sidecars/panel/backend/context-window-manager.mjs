@@ -43,7 +43,7 @@ import { LS_ADDR } from './config.mjs';
 export const CONTEXT_WINDOW_MODES = Object.freeze(['256k', '512k', '768k', '1m']);
 const PATCHED_CONTEXT_MODES = Object.freeze(['512k', '768k', '1m']);
 
-const CTX_TOKENS_256K = 256_000;
+const CTX_TOKENS_OFFICIAL_DEFAULT = 512_000;
 const CTX_TOKENS_512K = 524_288;
 const CTX_TOKENS_768K = 786_432;
 const CTX_TOKENS_1M_DISPLAY = 1_000_000;
@@ -236,8 +236,8 @@ function resolveContextModeSpec(mode) {
       };
     default:
       return {
-        contextWindow: CTX_TOKENS_256K,
-        checkpointLimit: CTX_TOKENS_256K,
+        contextWindow: CTX_TOKENS_OFFICIAL_DEFAULT,
+        checkpointLimit: CTX_TOKENS_OFFICIAL_DEFAULT,
         expectedBinaryState: 'official-256k',
       };
   }
@@ -2113,13 +2113,13 @@ async function switchStandaloneDesktopLocked(targetMode, layout, options = {}) {
           hasValidDotOrig = false;
         }
       }
-      const activeSha = computeContextFileSha256(lsPath);
       const bkValid =
         existsSync(officialBackupPath) &&
         inspectAntigravityContextBinary(officialBackupPath).state === 'official-256k';
       const bkSha = bkValid ? computeContextFileSha256(officialBackupPath) : '';
-      if (!bkValid || bkSha !== activeSha) {
-        const seedSource = !bkValid && hasValidDotOrig ? dotOrigPath : lsPath;
+      const seedSource = !bkValid && hasValidDotOrig ? dotOrigPath : lsPath;
+      const seedSha = computeContextFileSha256(seedSource);
+      if (!bkValid || bkSha !== seedSha) {
         const tmpBk = `${officialBackupPath}.tmp-${process.pid || 0}-${Date.now()}`;
         try {
           safeCopyFile(seedSource, tmpBk);
@@ -2788,7 +2788,7 @@ export async function switchContextWindowMode(rawMode, options = {}) {
  */
 export async function ensureContextWindowAlignedOnBoot(options = {}) {
   const policyRecord = readContextPolicyRecord(options);
-  if (!policyRecord?.mode) {
+  if (!policyRecord?.mode || policyRecord.mode === '256k') {
     return null;
   }
   const snap = await getContextWindowControlSnapshot({ ...options, forceRefresh: true });

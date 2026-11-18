@@ -833,6 +833,7 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
   const turnFileEditHistoryMap = new Map();
   let awaitingRollbackConfirmForTurn = null;
   let rollbackLookaheadRemaining = 0;
+  let lastExplicitMaxContextTokens = 0;
 
   const extractUserTurnPrompt = (step) => {
     const ui = step?.userInput;
@@ -1032,6 +1033,10 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
           : null);
 
     const context = chat?.chatStartMetadata?.contextWindowMetadata;
+    const explicitStepMaxContext = Number(context?.maxContextTokens || 0);
+    if (Number.isFinite(explicitStepMaxContext) && explicitStepMaxContext > 0) {
+      lastExplicitMaxContextTokens = explicitStepMaxContext;
+    }
     const contextBreakdown = extractContextBreakdown(chat);
 
     // 模型身份 5 级证据链优先级：仅采信当前请求自身的显式字段；
@@ -1313,7 +1318,12 @@ export function extractModelSteps(rawSteps = [], generatorMetadata = []) {
       estimatedContextTokens: Number(
         context?.estimatedTokensUsed || contextBreakdown?.totalTokens || 0
       ),
-      maxContextBudgetTokens: Number(context?.maxContextTokens || 256000),
+      maxContextBudgetTokens:
+        explicitStepMaxContext > 0
+          ? explicitStepMaxContext
+          : lastExplicitMaxContextTokens > 0
+            ? lastExplicitMaxContextTokens
+            : 512000,
       contextBreakdown,
       measurementVersion: MEASUREMENT_VERSION,
       isComplete: complete,

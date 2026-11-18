@@ -826,9 +826,9 @@ export function mountWindowOverlay() {
   const hoverCtxTierBadge = h('span', {
     className: 'agent-badge',
     hidden: true,
-    text: '256K',
+    text: '原版 512K',
   });
-  const hoverCtxSummaryText = h('span', { className: 'text-mono', text: '0 / 256.0k (0%)' });
+  const hoverCtxSummaryText = h('span', { className: 'text-mono', text: '0 / 512.0k (0%)' });
   const hoverCtxSegmentBar = ContextSegmentMeter({ context: {} });
 
   // 固定预占 10 个双列图例槽位，排序时仅就地替换色块类名与文本，不调用 appendChild 移动节点
@@ -1688,10 +1688,14 @@ export function mountWindowOverlay() {
     const overviewActive = overviewScopedConv || activeConv;
     const ctx = ctxAgent?.context || overviewActive.context || activeConv.context || {};
     const ctxCtrl = telemetry.contextWindowControl || null;
-    const fallbackLimit =
-      ctxCtrl?.installed && ctxCtrl?.runningMatchesDisk && ctxCtrl?.targetTokens
-        ? ctxCtrl.targetTokens
-        : 256000;
+    const isPatchedRunning =
+      ctxCtrl?.installed &&
+      ctxCtrl?.runningMatchesDisk &&
+      ctxCtrl?.diskMode &&
+      ctxCtrl.diskMode !== '256k' &&
+      ctxCtrl.diskMode !== 'unknown' &&
+      ctxCtrl?.targetTokens;
+    const fallbackLimit = isPatchedRunning ? ctxCtrl.targetTokens : 512000;
     const limitTokens = Number(ctx.compactionLimitTokens || ctx.limitTokens || fallbackLimit);
     const totalTokens = Number(ctx.totalTokens || 0);
     const usedPct =

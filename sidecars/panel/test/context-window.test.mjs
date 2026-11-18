@@ -672,3 +672,121 @@ test('Regression: macOS darwin snapshot caches ps/lsof process probe and exposes
   assert.equal(psCalls, 1, 'Cached darwin probe skips redundant ps spawn');
   assert.equal(lsofCalls, 1, 'Cached darwin probe skips redundant lsof spawn');
 });
+
+test('Official native 512K support: unpatched mode never clobbers 512K step budgets, skips boot patching, and prefers pristine .orig', async () => {
+  clearContextWindowCachesForTests();
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'um-ctx-512native-'));
+  try {
+    const appDir = path.join(tmpRoot, 'Antigravity');
+    const binDir = path.join(appDir, 'resources', 'bin');
+    const syncDir = path.join(tmpRoot, 'sync');
+    const policyPath = path.join(tmpRoot, 'antigravity-context-policy.json');
+    fs.mkdirSync(binDir, { recursive: true });
+
+    const pristinePe = buildSyntheticPe64ClampBinary({ seedByte: 0x31 });
+    const dirtyActivePe = Buffer.from(pristinePe);
+    dirtyActivePe[0x401] = 0xfe; // simulate external non-clamp modification while clamp site remains unpatched
+    const lsPath = path.join(binDir, 'language_server.exe');
+    fs.writeFileSync(lsPath, dirtyActivePe);
+    fs.writeFileSync(`${lsPath}.orig`, pristinePe);
+
+    const opts = {
+      platform: 'win32',
+      desktopAppPath: appDir,
+      desktopSyncDir: syncDir,
+      policyFilePath: policyPath,
+      desktopVerifyExecFn: async () => true,
+      inspectRunningFn: async () => ({ running: true, matchesDisk: true }),
+    };
+
+    const snap = await getContextWindowControlSnapshot({ ...opts, forceRefresh: true });
+    assert.equal(snap.diskMode, '256k');
+    assert.equal(snap.targetTokens, 512000, 'Official unpatched mode defaults targetTokens to 512000');
+
+    // Switching to 768k seeds .official from pristine .orig rather than dirtyActivePe
+    const sw768 = await switchContextWindowMode('768k', opts);
+    assert.equal(sw768.ok, true);
+    assert.equal(
+      sha256(fs.readFileSync(path.join(syncDir, 'language_server.exe.official'))),
+      sha256(pristinePe),
+      'Seeds .official backup from pristine .orig when present'
+    );
+
+    // Switching back to official (256k) restores pristine .orig and boot alignment becomes a read-only no-op
+    const swOfficial = await switchContextWindowMode('256k', opts);
+    assert.equal(swOfficial.ok, true);
+    assert.equal(sha256(fs.readFileSync(lsPath)), sha256(pristinePe));
+    const bootRes = await ensureContextWindowAlignedOnBoot(opts);
+    assert.equal(bootRes, null, 'Official mode policy never triggers boot binary patching');
+
+    // Verify telemetry-builder preserves Google native 512000 & 524288 budgets without overriding to 256000
+    const convId = 'native512-1111-2222-3333-444444444444';
+    const nowIso = new Date().toISOString();
+    const h = backendHarness({
+      summaries: {
+        [convId]: { title: 'Native 512K Session', status: 'CASCADE_RUN_STATUS_IDLE' },
+      },
+      trajectories: {
+        [convId]: {
+          trajectory: {
+            steps: [
+              {
+                status: 'CORTEX_STEP_STATUS_DONE',
+                metadata: {
+                  sourceTrajectoryStepInfo: { stepIndex: 0 },
+                  createdAt: nowIso,
+                  completedAt: nowIso,
+                  modelUsage: {
+                    model: 'MODEL_PLACEHOLDER_M429',
+                    inputTokens: '1000',
+                    cacheReadTokens: '299000',
+                    outputTokens: '500',
+                  },
+                },
+                plannerResponse: { response: 'ok' },
+              },
+              {
+                type: 'CORTEX_STEP_TYPE_CHECKPOINT',
+                status: 'CORTEX_STEP_STATUS_DONE',
+                metadata: {
+                  sourceTrajectoryStepInfo: { stepIndex: 1 },
+                  createdAt: nowIso,
+                  completedAt: nowIso,
+                  modelUsage: {
+                    model: 'MODEL_PLACEHOLDER_M429',
+                    inputTokens: '2000',
+                    cacheReadTokens: '40000',
+                    outputTokens: '800',
+                  },
+                },
+              },
+            ],
+            generatorMetadata: [
+              {
+                stepIndices: [0],
+                chatModel: {
+                  chatStartMetadata: {
+                    contextWindowMetadata: {
+                      estimatedTokensUsed: 300000,
+                      maxContextTokens: 524288,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const payload = await h.buildTelemetryPayloadInternal(convId, false);
+    assert.equal(
+      payload.activeConversation.context.compactionLimitTokens,
+      524288,
+      'Unpatched official mode preserves native 524288 budget across trailing checkpoint step'
+    );
+  } finally {
+    clearContextWindowCachesForTests();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});

@@ -47,7 +47,7 @@ export const ContextSegmentMeter = defineComponent({
 
     function syncMeter() {
       const ctx = getProps().context || {};
-      const limit = Math.max(1, Number(ctx.compactionLimitTokens || ctx.limitTokens || 256000));
+      const limit = Math.max(1, Number(ctx.compactionLimitTokens || ctx.limitTokens || 512000));
       const scored = SEGMENT_DEFS.map((def, defaultOrder) => {
         const val = def.getVal(ctx);
         const pct = Math.min(100, (val / limit) * 100);
